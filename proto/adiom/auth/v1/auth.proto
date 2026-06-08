@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package adiom.auth.v1;
+
+option go_package = "github.com/adiom-data/framework/gen/go/adiom/auth/v1;authv1";
+
+// AuthService exchanges presented credentials for standard Adiom access tokens.
+service AuthService {
+  rpc ExchangeCredential(ExchangeCredentialRequest) returns (ExchangeCredentialResponse);
+}
+
+// ExchangeCredentialRequest carries a credential presented to the gateway.
+//
+// The credential can be an external OIDC JWT, an API key, or another credential
+// format supported by the auth service.
+message ExchangeCredentialRequest {
+  string credential = 1;
+}
+
+// ExchangeCredentialResponse returns a short-lived access token minted by the
+// auth service.
+message ExchangeCredentialResponse {
+  string access_token = 1;
+}

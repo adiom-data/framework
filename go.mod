@@ -12,3 +12,5 @@ require (
 )
 
 require golang.org/x/oauth2 v0.36.0
+
+require github.com/gorilla/securecookie v1.1.2

@@ -21,8 +21,9 @@ func TestExchangeCredentialAuthorizesAndMintsToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	issuer, err := tokenissuer.New(tokenissuer.Config{
-		Issuer:     "https://auth.example.com",
-		PrivateKey: privateKey,
+		Issuer:      "https://auth.example.com",
+		ActiveKeyID: "test-key",
+		Keys:        []tokenissuer.SigningKey{{KeyID: "test-key", PrivateKey: privateKey}},
 	})
 	if err != nil {
 		t.Fatal(err)

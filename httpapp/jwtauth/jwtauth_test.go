@@ -46,8 +46,8 @@ func TestVerifierVerify(t *testing.T) {
 	issuer := testIssuer(t, key)
 
 	verifier, err := NewVerifier(Config{
-		Issuer:   issuer + "/",
-		Audience: "service",
+		Issuer:           issuer + "/",
+		AllowedAudiences: []string{"service"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -81,8 +81,8 @@ func TestVerifierRejectsInvalidAudience(t *testing.T) {
 	issuer := testIssuer(t, key)
 
 	verifier, err := NewVerifier(Config{
-		Issuer:   issuer,
-		Audience: "expected",
+		Issuer:           issuer,
+		AllowedAudiences: []string{"expected"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -91,6 +91,59 @@ func TestVerifierRejectsInvalidAudience(t *testing.T) {
 	token := signToken(t, key, map[string]any{
 		"iss": issuer,
 		"aud": []string{"other"},
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	if _, err := verifier.Verify(context.Background(), token); err == nil {
+		t.Fatal("Verify() succeeded, want error")
+	}
+}
+
+func TestVerifierAllowsAnyConfiguredAudience(t *testing.T) {
+	t.Parallel()
+
+	key := testKey(t)
+	issuer := testIssuer(t, key)
+
+	verifier, err := NewVerifier(Config{
+		Issuer:           issuer,
+		AllowedAudiences: []string{"web-client", "mobile-client"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	token := signToken(t, key, map[string]any{
+		"iss": issuer,
+		"sub": "user-1",
+		"aud": []string{"mobile-client"},
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	claims, err := verifier.Verify(context.Background(), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Subject != "user-1" {
+		t.Fatalf("Subject = %q, want user-1", claims.Subject)
+	}
+}
+
+func TestVerifierRejectsWhenNoConfiguredAudienceMatches(t *testing.T) {
+	t.Parallel()
+
+	key := testKey(t)
+	issuer := testIssuer(t, key)
+
+	verifier, err := NewVerifier(Config{
+		Issuer:           issuer,
+		AllowedAudiences: []string{"web-client", "mobile-client"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	token := signToken(t, key, map[string]any{
+		"iss": issuer,
+		"aud": []string{"other-client"},
 		"exp": time.Now().Add(time.Hour).Unix(),
 	})
 	if _, err := verifier.Verify(context.Background(), token); err == nil {
@@ -151,8 +204,8 @@ func TestMiddlewareStoresClaims(t *testing.T) {
 	issuer := testIssuer(t, key)
 
 	verifier, err := NewVerifier(Config{
-		Issuer:   issuer,
-		Audience: "service",
+		Issuer:           issuer,
+		AllowedAudiences: []string{"service"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -191,8 +244,8 @@ func TestMiddlewareRejectsMissingBearer(t *testing.T) {
 	key := testKey(t)
 	issuer := testIssuer(t, key)
 	verifier, err := NewVerifier(Config{
-		Issuer:   issuer,
-		Audience: "service",
+		Issuer:           issuer,
+		AllowedAudiences: []string{"service"},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -13,7 +13,7 @@ type ExternalIdentity struct {
 	Claims  map[string]any
 }
 
-// Identity is the final identity minted into Adiom access tokens.
+// Identity is the final identity minted into application access tokens.
 type Identity struct {
 	Subject    string
 	Scopes     []string

@@ -19,6 +19,8 @@ var (
 	errNotConfigured  = errors.New("browserauth: not configured")
 )
 
+const DefaultRefreshLeeway = time.Minute
+
 // SessionRefresher refreshes upstream browser auth state before token minting.
 type SessionRefresher interface {
 	RefreshSession(context.Context, Session) (Session, error)
@@ -26,12 +28,13 @@ type SessionRefresher interface {
 
 // TokenEndpoint mints final API tokens from browser auth sessions.
 type TokenEndpoint struct {
-	Store      SessionStore
-	Cookie     SessionCookie
-	Refresher  SessionRefresher
-	Authorizer auth.Authorizer
-	Issuer     *tokenissuer.Issuer
-	Now        func() time.Time
+	Store         SessionStore
+	Cookie        SessionCookie
+	Refresher     SessionRefresher
+	RefreshLeeway time.Duration
+	Authorizer    auth.Authorizer
+	Issuer        *tokenissuer.Issuer
+	Now           func() time.Time
 }
 
 // TokenResponse is returned by TokenEndpoint.
@@ -82,12 +85,9 @@ func (e TokenEndpoint) Mint(r *http.Request) (string, error) {
 	if !session.ExpiresAt.IsZero() && !now.Before(session.ExpiresAt) {
 		return "", errExpiredSession
 	}
-	if e.Refresher != nil {
-		session, err = e.Refresher.RefreshSession(r.Context(), session)
+	if e.shouldRefresh(session, now) {
+		session, err = e.refreshSession(r.Context(), session)
 		if err != nil {
-			return "", errInvalidSession
-		}
-		if err := e.Store.Update(r.Context(), session); err != nil {
 			return "", errInvalidSession
 		}
 	}
@@ -110,9 +110,55 @@ func statusCode(err error) int {
 	return http.StatusUnauthorized
 }
 
+func (e TokenEndpoint) refreshSession(ctx context.Context, session Session) (Session, error) {
+	if store, ok := e.Store.(SessionUpdateStore); ok {
+		return store.UpdateSession(ctx, session.ID, func(locked Session) (Session, error) {
+			now := e.now()
+			if !locked.RevokedAt.IsZero() {
+				return Session{}, errRevokedSession
+			}
+			if !locked.ExpiresAt.IsZero() && !now.Before(locked.ExpiresAt) {
+				return Session{}, errExpiredSession
+			}
+			if !e.shouldRefresh(locked, now) {
+				return locked, nil
+			}
+			return e.Refresher.RefreshSession(ctx, locked)
+		})
+	}
+	session, err := e.Refresher.RefreshSession(ctx, session)
+	if err != nil {
+		return Session{}, err
+	}
+	if err := e.Store.Update(ctx, session); err != nil {
+		return Session{}, err
+	}
+	return session, nil
+}
+
 func (e TokenEndpoint) now() time.Time {
 	if e.Now != nil {
 		return e.Now()
 	}
 	return time.Now()
+}
+
+func (e TokenEndpoint) shouldRefresh(session Session, now time.Time) bool {
+	if e.Refresher == nil {
+		return false
+	}
+	if session.UpstreamExpiresAt.IsZero() {
+		return true
+	}
+	return !now.Add(e.refreshLeeway()).Before(session.UpstreamExpiresAt)
+}
+
+func (e TokenEndpoint) refreshLeeway() time.Duration {
+	if e.RefreshLeeway < 0 {
+		return 0
+	}
+	if e.RefreshLeeway > 0 {
+		return e.RefreshLeeway
+	}
+	return DefaultRefreshLeeway
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,8 +23,9 @@ func TestTokenEndpointMintsFromSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	issuer, err := tokenissuer.New(tokenissuer.Config{
-		Issuer:     "https://auth.example.com",
-		PrivateKey: privateKey,
+		Issuer:      "https://auth.example.com",
+		ActiveKeyID: "test-key",
+		Keys:        []tokenissuer.SigningKey{{KeyID: "test-key", PrivateKey: privateKey}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -74,20 +76,22 @@ func TestTokenEndpointRefreshesSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	issuer, err := tokenissuer.New(tokenissuer.Config{
-		Issuer:     "https://auth.example.com",
-		PrivateKey: privateKey,
+		Issuer:      "https://auth.example.com",
+		ActiveKeyID: "test-key",
+		Keys:        []tokenissuer.SigningKey{{KeyID: "test-key", PrivateKey: privateKey}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	store := memorySessionStore{
 		"sess_1": {
-			ID:           "sess_1",
-			Issuer:       "https://idp.example.com",
-			Subject:      "upstream-1",
-			RefreshToken: "refresh-1",
-			Claims:       map[string]any{"email": "old@example.com"},
-			ExpiresAt:    time.Now().Add(time.Hour),
+			ID:                "sess_1",
+			Issuer:            "https://idp.example.com",
+			Subject:           "upstream-1",
+			RefreshToken:      "refresh-1",
+			Claims:            map[string]any{"email": "old@example.com"},
+			ExpiresAt:         time.Now().Add(time.Hour),
+			UpstreamExpiresAt: time.Now().Add(30 * time.Second),
 		},
 	}
 	endpoint := TokenEndpoint{
@@ -116,6 +120,118 @@ func TestTokenEndpointRefreshesSession(t *testing.T) {
 	}
 }
 
+func TestTokenEndpointSkipsRefreshWhenUpstreamTokenIsFresh(t *testing.T) {
+	t.Parallel()
+
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer, err := tokenissuer.New(tokenissuer.Config{
+		Issuer:      "https://auth.example.com",
+		ActiveKeyID: "test-key",
+		Keys:        []tokenissuer.SigningKey{{KeyID: "test-key", PrivateKey: privateKey}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	store := memorySessionStore{
+		"sess_1": {
+			ID:                "sess_1",
+			Issuer:            "https://idp.example.com",
+			Subject:           "upstream-1",
+			RefreshToken:      "refresh-1",
+			Claims:            map[string]any{"email": "old@example.com"},
+			ExpiresAt:         now.Add(time.Hour),
+			UpstreamExpiresAt: now.Add(10 * time.Minute),
+		},
+	}
+	endpoint := TokenEndpoint{
+		Store: store,
+		Refresher: refresherFunc(func(context.Context, Session) (Session, error) {
+			t.Fatal("refresh should not be called")
+			return Session{}, nil
+		}),
+		Authorizer: auth.AuthorizerFunc(func(_ context.Context, external auth.ExternalIdentity) (auth.Identity, error) {
+			if external.Claims["email"] != "old@example.com" {
+				t.Fatalf("email claim=%v want old@example.com", external.Claims["email"])
+			}
+			return auth.Identity{Subject: "user-1"}, nil
+		}),
+		Issuer: issuer,
+		Now:    func() time.Time { return now },
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/token", nil)
+	req.AddCookie(&http.Cookie{Name: DefaultSessionCookieName, Value: "sess_1"})
+	if _, err := endpoint.Mint(req); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTokenEndpointRechecksRefreshAfterSessionUpdateLock(t *testing.T) {
+	t.Parallel()
+
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer, err := tokenissuer.New(tokenissuer.Config{
+		Issuer:      "https://auth.example.com",
+		ActiveKeyID: "test-key",
+		Keys:        []tokenissuer.SigningKey{{KeyID: "test-key", PrivateKey: privateKey}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	store := &lockedSessionStore{
+		initial: Session{
+			ID:                "sess_1",
+			Issuer:            "https://idp.example.com",
+			Subject:           "upstream-1",
+			RefreshToken:      "refresh-1",
+			Claims:            map[string]any{"email": "old@example.com"},
+			ExpiresAt:         now.Add(time.Hour),
+			UpstreamExpiresAt: now.Add(30 * time.Second),
+		},
+		locked: Session{
+			ID:                "sess_1",
+			Issuer:            "https://idp.example.com",
+			Subject:           "upstream-1",
+			RefreshToken:      "refresh-2",
+			Claims:            map[string]any{"email": "new@example.com"},
+			ExpiresAt:         now.Add(time.Hour),
+			UpstreamExpiresAt: now.Add(10 * time.Minute),
+		},
+	}
+	endpoint := TokenEndpoint{
+		Store: store,
+		Refresher: refresherFunc(func(context.Context, Session) (Session, error) {
+			t.Fatal("refresh should not be called after lock recheck")
+			return Session{}, nil
+		}),
+		Authorizer: auth.AuthorizerFunc(func(_ context.Context, external auth.ExternalIdentity) (auth.Identity, error) {
+			if external.Claims["email"] != "new@example.com" {
+				t.Fatalf("email claim=%v want new@example.com", external.Claims["email"])
+			}
+			return auth.Identity{Subject: "user-1"}, nil
+		}),
+		Issuer: issuer,
+		Now:    func() time.Time { return now },
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/token", nil)
+	req.AddCookie(&http.Cookie{Name: DefaultSessionCookieName, Value: "sess_1"})
+	if _, err := endpoint.Mint(req); err != nil {
+		t.Fatal(err)
+	}
+	if !store.updated {
+		t.Fatal("session update hook was not called")
+	}
+}
+
 func TestTokenEndpointHandlerReportsMisconfigurationAsServerError(t *testing.T) {
 	t.Parallel()
 
@@ -135,8 +251,9 @@ func TestTokenEndpointHandlerReportsAccessToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	issuer, err := tokenissuer.New(tokenissuer.Config{
-		Issuer:     "https://auth.example.com",
-		PrivateKey: privateKey,
+		Issuer:      "https://auth.example.com",
+		ActiveKeyID: "test-key",
+		Keys:        []tokenissuer.SigningKey{{KeyID: "test-key", PrivateKey: privateKey}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -173,6 +290,26 @@ func TestTokenEndpointHandlerReportsAccessToken(t *testing.T) {
 	}
 }
 
+func TestSessionCookieDefaultsSecure(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	SessionCookie{}.Set(rec, "sess_1", time.Now().Add(time.Hour))
+	if got := rec.Result().Header.Get("Set-Cookie"); !strings.Contains(got, "Secure") {
+		t.Fatalf("session cookie is not secure: %q", got)
+	}
+}
+
+func TestSessionCookieAllowsExplicitInsecure(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	SessionCookie{Insecure: true}.Set(rec, "sess_1", time.Now().Add(time.Hour))
+	if got := rec.Result().Header.Get("Set-Cookie"); strings.Contains(got, "Secure") {
+		t.Fatalf("session cookie is secure: %q", got)
+	}
+}
+
 type memorySessionStore map[string]Session
 
 func (m memorySessionStore) Create(_ context.Context, session Session) (Session, error) {
@@ -200,4 +337,36 @@ type refresherFunc func(context.Context, Session) (Session, error)
 
 func (f refresherFunc) RefreshSession(ctx context.Context, session Session) (Session, error) {
 	return f(ctx, session)
+}
+
+type lockedSessionStore struct {
+	initial Session
+	locked  Session
+	updated bool
+}
+
+func (s *lockedSessionStore) Create(context.Context, Session) (Session, error) {
+	return Session{}, nil
+}
+
+func (s *lockedSessionStore) Get(context.Context, string) (Session, error) {
+	return s.initial, nil
+}
+
+func (s *lockedSessionStore) Update(context.Context, Session) error {
+	return nil
+}
+
+func (s *lockedSessionStore) Revoke(context.Context, string) error {
+	return nil
+}
+
+func (s *lockedSessionStore) UpdateSession(_ context.Context, _ string, update func(Session) (Session, error)) (Session, error) {
+	session, err := update(s.locked)
+	if err != nil {
+		return Session{}, err
+	}
+	s.updated = true
+	s.locked = session
+	return session, nil
 }

@@ -5,16 +5,18 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/gorilla/securecookie"
 	"golang.org/x/oauth2"
 )
 
-const DefaultStateCookieName = "adiom_auth_state"
+const DefaultStateCookieName = "auth_state"
 
 // Config configures browser OIDC auth endpoints.
 type Config struct {
@@ -23,16 +25,20 @@ type Config struct {
 	ClientSecret string
 	RedirectURL  string
 	Scopes       []string
-	HTTPClient   *http.Client
-	StateStore   StateStore
+	// AuthCodeOptions are added to the provider authorization redirect.
+	// Use this for provider-specific parameters such as Google offline access.
+	AuthCodeOptions []oauth2.AuthCodeOption
+	HTTPClient      *http.Client
+	StateStore      StateStore
 }
 
 // BrowserAuth manages OIDC browser login and callback flows.
 type BrowserAuth struct {
-	issuer     string
-	provider   *oidc.Provider
-	oauth2     oauth2.Config
-	stateStore StateStore
+	issuer          string
+	provider        *oidc.Provider
+	oauth2          oauth2.Config
+	stateStore      StateStore
+	authCodeOptions []oauth2.AuthCodeOption
 }
 
 // Tokens are returned after a successful callback exchange.
@@ -61,8 +67,9 @@ type StateStore interface {
 type CookieStateStore struct {
 	Name     string
 	Path     string
-	Secure   bool
+	Insecure bool
 	SameSite http.SameSite
+	Codecs   []securecookie.Codec
 }
 
 // New discovers an OIDC provider and returns browser auth helpers.
@@ -105,7 +112,8 @@ func New(ctx context.Context, cfg Config) (*BrowserAuth, error) {
 			RedirectURL:  cfg.RedirectURL,
 			Scopes:       scopes,
 		},
-		stateStore: stateStore,
+		stateStore:      stateStore,
+		authCodeOptions: append([]oauth2.AuthCodeOption(nil), cfg.AuthCodeOptions...),
 	}, nil
 }
 
@@ -117,14 +125,17 @@ func (b *BrowserAuth) SessionFromTokens(tokens Tokens) (Session, error) {
 		return Session{}, errors.New("browserauth: token subject is required")
 	}
 	refreshToken := ""
+	upstreamExpiresAt := time.Time{}
 	if tokens.OAuth2Token != nil {
 		refreshToken = tokens.OAuth2Token.RefreshToken
+		upstreamExpiresAt = tokens.OAuth2Token.Expiry
 	}
 	return Session{
-		Issuer:       b.issuer,
-		Subject:      subject,
-		RefreshToken: refreshToken,
-		Claims:       tokens.Claims,
+		Issuer:            b.issuer,
+		Subject:           subject,
+		RefreshToken:      refreshToken,
+		Claims:            tokens.Claims,
+		UpstreamExpiresAt: upstreamExpiresAt,
 	}, nil
 }
 
@@ -141,6 +152,7 @@ func (b *BrowserAuth) RefreshSession(ctx context.Context, session Session) (Sess
 	if token.RefreshToken != "" {
 		session.RefreshToken = token.RefreshToken
 	}
+	session.UpstreamExpiresAt = token.Expiry
 	rawIDToken, _ := token.Extra("id_token").(string)
 	if rawIDToken == "" {
 		return session, nil
@@ -165,7 +177,9 @@ func (b *BrowserAuth) LoginHandler() http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		http.Redirect(w, r, b.oauth2.AuthCodeURL(session.State, oauth2.S256ChallengeOption(session.CodeVerifier)), http.StatusFound)
+		options := append([]oauth2.AuthCodeOption{}, b.authCodeOptions...)
+		options = append(options, oauth2.S256ChallengeOption(session.CodeVerifier))
+		http.Redirect(w, r, b.oauth2.AuthCodeURL(session.State, options...), http.StatusFound)
 	})
 }
 
@@ -233,7 +247,7 @@ func (s CookieStateStore) NewSession(w http.ResponseWriter, _ *http.Request) (Lo
 		State:        state,
 		CodeVerifier: oauth2.GenerateVerifier(),
 	}
-	value, err := encodeSession(session)
+	value, err := s.encodeSession(session)
 	if err != nil {
 		return LoginSession{}, err
 	}
@@ -248,7 +262,7 @@ func (s CookieStateStore) VerifySession(w http.ResponseWriter, r *http.Request, 
 		return LoginSession{}, errors.New("browserauth: missing state")
 	}
 	http.SetCookie(w, s.cookie("", -1))
-	session, err := decodeSession(cookie.Value)
+	session, err := s.decodeSession(cookie.Value)
 	if err != nil {
 		return LoginSession{}, err
 	}
@@ -268,7 +282,7 @@ func (s CookieStateStore) cookie(value string, maxAge int) *http.Cookie {
 		Value:    value,
 		Path:     s.path(),
 		HttpOnly: true,
-		Secure:   s.Secure,
+		Secure:   !s.Insecure,
 		SameSite: sameSite,
 		MaxAge:   maxAge,
 	}
@@ -296,25 +310,56 @@ func randomState() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
-func encodeSession(session LoginSession) (string, error) {
-	data, err := json.Marshal(session)
-	if err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(data), nil
+func (s CookieStateStore) encodeSession(session LoginSession) (string, error) {
+	return securecookie.EncodeMulti(s.name(), session, s.codecs()...)
 }
 
-func decodeSession(value string) (LoginSession, error) {
-	data, err := base64.RawURLEncoding.DecodeString(value)
-	if err != nil {
-		return LoginSession{}, errors.New("browserauth: invalid state")
-	}
+func (s CookieStateStore) decodeSession(value string) (LoginSession, error) {
 	var session LoginSession
-	if err := json.Unmarshal(data, &session); err != nil {
+	if err := securecookie.DecodeMulti(s.name(), value, &session, s.codecs()...); err != nil {
 		return LoginSession{}, errors.New("browserauth: invalid state")
 	}
 	if session.State == "" || session.CodeVerifier == "" {
 		return LoginSession{}, errors.New("browserauth: invalid state")
 	}
 	return session, nil
+}
+
+func (s CookieStateStore) codecs() []securecookie.Codec {
+	if len(s.Codecs) > 0 {
+		return s.Codecs
+	}
+	return defaultStateCodecs()
+}
+
+var (
+	defaultStateCodecsOnce  sync.Once
+	defaultStateCodecsValue []securecookie.Codec
+	defaultStateCodecsErr   error
+)
+
+func defaultStateCodecs() []securecookie.Codec {
+	defaultStateCodecsOnce.Do(func() {
+		hashKey, err := randomBytes(64)
+		if err != nil {
+			defaultStateCodecsErr = err
+			return
+		}
+		blockKey, err := randomBytes(32)
+		if err != nil {
+			defaultStateCodecsErr = err
+			return
+		}
+		defaultStateCodecsValue = []securecookie.Codec{securecookie.New(hashKey, blockKey)}
+	})
+	if defaultStateCodecsErr != nil {
+		panic(defaultStateCodecsErr)
+	}
+	return defaultStateCodecsValue
+}
+
+func randomBytes(size int) ([]byte, error) {
+	raw := make([]byte, size)
+	_, err := rand.Read(raw)
+	return raw, err
 }

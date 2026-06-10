@@ -1,6 +1,6 @@
 # auth
 
-`auth` contains reusable building blocks for implementing an Adiom auth service.
+`auth` contains reusable building blocks for implementing an application auth service.
 
 The standard service contract is generated from `proto/adiom/auth/v1/auth.proto`:
 
@@ -59,21 +59,93 @@ credential -> verified external identity -> app authorizer -> final identity -> 
 ```
 
 `auth.ExternalIdentity` is the upstream issuer/subject/claims. `auth.Identity`
-is the final identity minted into Adiom API bearer tokens.
+is the final identity minted into application API bearer tokens.
+
+## Issuer Endpoints
+
+Services can verify tokens minted by `auth/tokenissuer` with `httpapp/jwtauth`
+when the issuer serves:
+
+```text
+/.well-known/openid-configuration
+/.well-known/jwks.json
+```
+
+`tokenissuer.Issuer` provides handlers for both endpoints:
+
+```go
+mux.Handle("/.well-known/openid-configuration", issuer.MetadataHandler())
+mux.Handle("/.well-known/jwks.json", issuer.JWKSHandler())
+```
+
+The JWT itself is standard: `iss`, `sub`, `iat`, `exp`, optional `aud`, a `kid`
+header, and an EdDSA signature. The default token also includes `scope`,
+`scopes`, and `attributes` claims from `auth.Identity`.
+
+For key rotation, configure multiple signing keys and choose the active key:
+
+```go
+issuer, err := tokenissuer.New(tokenissuer.Config{
+	Issuer:      "https://app.example.com/auth",
+	ActiveKeyID: "auth-2026-06",
+	Keys: []tokenissuer.SigningKey{
+		{KeyID: "auth-2026-05", PublicKey: oldPublicKey},
+		{KeyID: "auth-2026-06", PrivateKey: newPrivateKey},
+	},
+})
+```
+
+The active key signs new tokens. JWKS publishes every configured public key, so
+old tokens remain verifiable until they expire.
 
 ## Browser Auth
 
 Experimental: prefer direct SPA OIDC plus `AuthService.ExchangeCredential` until
 we deliberately need server-owned browser sessions.
 
-For customer-domain or shared-hostname auth, mount browser auth routes under a
-path such as `/auth`:
+For customer-domain or shared-hostname auth, mount browser auth under a path
+such as `/auth`:
 
 ```text
 /auth/login
 /auth/callback
 /auth/token
 /auth/logout
+/auth/.well-known/openid-configuration
+/auth/.well-known/jwks.json
+```
+
+The composed handler serves those routes relative to its mount point:
+
+```go
+handler := browserAuth.Handler(browserauth.HandlerConfig{
+	BasePath:   "/auth",
+	Store:      browserauth.SQLSessionStore{DB: db},
+	Cookie:     browserauth.SessionCookie{},
+	Authorizer: authorizer,
+	Issuer:     issuer,
+	Refresher:  browserAuth,
+})
+
+mux.Handle("/auth/", http.StripPrefix("/auth", handler))
+```
+
+When `SessionCookie.Path` is empty, the composed handler defaults it to
+`BasePath`, so the browser session cookie is scoped to the auth mount.
+When `Issuer` is set, the composed handler also serves the matching discovery
+and JWKS endpoints at the same mount point.
+
+Some providers require extra authorization URL parameters to issue refresh
+tokens. For example, Google commonly needs:
+
+```go
+browserauth.Config{
+	// ...
+	AuthCodeOptions: []oauth2.AuthCodeOption{
+		oauth2.AccessTypeOffline,
+		oauth2.SetAuthURLParam("prompt", "consent"),
+	},
+}
 ```
 
 The callback should save a `browserauth.Session` behind an opaque session cookie.
@@ -82,16 +154,30 @@ runs the same app authorizer, and mints the final API JWT. The SPA uses that
 final JWT as its `Authorization: Bearer ...` token for API calls.
 
 The browser session stores upstream auth state, not final app scopes. Final
-scopes should be resolved each time a new API token is minted.
+scopes should be resolved each time a new API token is minted. `SessionTTL` is
+the maximum browser-auth session lifetime; once it expires, `/auth/token`
+returns unauthorized and the user must log in again.
 
 For silent refresh, configure `browserauth.TokenEndpoint.Refresher` with the
-`BrowserAuth` instance. The endpoint can refresh upstream OIDC state from the
-stored refresh token before minting a new final API JWT.
+`BrowserAuth` instance. The endpoint refreshes upstream OIDC state from the
+stored refresh token when `upstream_expires_at` is missing or within the
+configured refresh leeway. The default leeway is one minute. Stores can
+implement `browserauth.SessionUpdateStore` to coordinate concurrent refreshes;
+`SQLSessionStore` does this with a row lock.
+
+Browser auth cookies default to `HttpOnly`, `Secure`, and `SameSite=Lax`.
+Local HTTP development can opt into insecure cookies explicitly. The temporary
+OAuth state/PKCE cookie is signed and encrypted. For multiple replicas, provide
+stable `CookieStateStore.Codecs` so callbacks can be verified by any replica.
+
+CORS is intentionally not handled in `browserauth`. Prefer same-host `/auth`
+mounts. If `/auth/token` is cross-origin, configure CORS at the gateway or
+application HTTP layer.
 
 ## Browser Session Schema
 
-The framework defines the `browserauth.SessionStore` interface. A production
-Postgres-backed store can use a minimal table like this:
+The framework defines the `browserauth.SessionStore` interface and includes a
+Postgres-compatible `browserauth.SQLSessionStore`. Run a migration like this:
 
 ```sql
 create table auth_sessions (
@@ -104,6 +190,7 @@ create table auth_sessions (
   claims jsonb not null default '{}'::jsonb,
 
   expires_at timestamptz not null,
+  upstream_expires_at timestamptz,
   revoked_at timestamptz,
 
   created_at timestamptz not null default now(),
@@ -119,11 +206,12 @@ create index auth_sessions_expires_at_idx
 ```
 
 `id` is the opaque value stored in the browser cookie. `expires_at` is the
-browser session lifetime, not the upstream access-token expiration. `(issuer,
-subject)` should be indexed for user/session lookup, but it should not be unique
-on the session table because one upstream user can have multiple browser
-sessions. App-owned user mapping tables may choose to enforce uniqueness on
-`(issuer, subject)`.
+browser session lifetime. `upstream_expires_at` is the upstream OIDC token-state
+expiration used to decide when to refresh. `(issuer, subject)` should be indexed
+for user/session lookup, but it should not be unique on the session table
+because one upstream user can have multiple browser sessions. App-owned user
+mapping tables may choose to enforce uniqueness on `(issuer, subject)`.
 
-Refresh tokens should be encrypted at rest by the concrete store or the
-database/storage layer.
+`SQLSessionStore` stores refresh tokens as provided. For production browser
+sessions, encrypt them at the database/storage layer or wrap `SessionStore` with
+application-managed encryption before writing refresh tokens.

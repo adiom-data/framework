@@ -26,11 +26,12 @@ var (
 // Config configures JWT verification against an OIDC issuer.
 type Config struct {
 	Issuer string
-	// Audience is optional. When set, Verify requires the token aud claim to
-	// contain this value. When empty, Verify skips audience validation.
-	Audience   string
-	HTTPClient *http.Client
-	ClockSkew  time.Duration
+	// AllowedAudiences is optional. When set, Verify requires the token aud claim
+	// to contain at least one configured value. When empty, Verify skips audience
+	// validation.
+	AllowedAudiences []string
+	HTTPClient       *http.Client
+	ClockSkew        time.Duration
 }
 
 // Claims are verified JWT claims.
@@ -70,11 +71,11 @@ func (c Claims) MarshalJSON() ([]byte, error) {
 
 // Verifier verifies JWT bearer tokens against cached JWKS keys.
 type Verifier struct {
-	issuer    string
-	audience  string
-	clockSkew time.Duration
-	keySet    *oidc.RemoteKeySet
-	now       func() time.Time
+	issuer           string
+	allowedAudiences []string
+	clockSkew        time.Duration
+	keySet           *oidc.RemoteKeySet
+	now              func() time.Time
 }
 
 // NewVerifier validates config and returns a JWT verifier.
@@ -101,11 +102,11 @@ func NewVerifier(cfg Config) (*Verifier, error) {
 		return nil, errors.New("jwtauth: issuer metadata missing jwks_uri")
 	}
 	return &Verifier{
-		issuer:    cfg.Issuer,
-		audience:  cfg.Audience,
-		clockSkew: cfg.ClockSkew,
-		keySet:    oidc.NewRemoteKeySet(providerCtx, metadata.JWKSURI),
-		now:       time.Now,
+		issuer:           cfg.Issuer,
+		allowedAudiences: allowedAudiences(cfg.AllowedAudiences),
+		clockSkew:        cfg.ClockSkew,
+		keySet:           oidc.NewRemoteKeySet(providerCtx, metadata.JWKSURI),
+		now:              time.Now,
 	}, nil
 }
 
@@ -142,10 +143,36 @@ func (v *Verifier) validateClaims(claims *Claims) error {
 	if claims.NotBefore != nil && now.Add(v.clockSkew).Before(claims.NotBefore.Time()) {
 		return errors.New("token is not valid yet")
 	}
-	if v.audience != "" && !claims.Audience.Contains(v.audience) {
-		return fmt.Errorf("audience %q not present", v.audience)
+	if len(v.allowedAudiences) > 0 && !containsAnyAudience(claims.Audience, v.allowedAudiences) {
+		return fmt.Errorf("audience does not contain any allowed value")
 	}
 	return nil
+}
+
+func allowedAudiences(values []string) []string {
+	seen := map[string]struct{}{}
+	var audiences []string
+	for _, audience := range values {
+		audience = strings.TrimSpace(audience)
+		if audience == "" {
+			continue
+		}
+		if _, ok := seen[audience]; ok {
+			continue
+		}
+		seen[audience] = struct{}{}
+		audiences = append(audiences, audience)
+	}
+	return audiences
+}
+
+func containsAnyAudience(tokenAudiences jwt.Audience, allowedAudiences []string) bool {
+	for _, audience := range allowedAudiences {
+		if tokenAudiences.Contains(audience) {
+			return true
+		}
+	}
+	return false
 }
 
 // Middleware requires a valid Bearer token and stores its claims on the request context.

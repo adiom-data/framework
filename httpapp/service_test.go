@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/adiom-data/framework/telemetry"
 )
 
 func TestServiceAssemblesConnectHealthAndRoutes(t *testing.T) {
@@ -54,5 +55,14 @@ func TestServiceIdleTimeoutOption(t *testing.T) {
 
 	if app.IdleTimeout != 45*time.Second {
 		t.Fatalf("IdleTimeout=%s want 45s", app.IdleTimeout)
+	}
+}
+
+func TestServiceTelemetryOption(t *testing.T) {
+	service := NewService(WithServiceTelemetry(telemetry.DefaultConfig("example")))
+	app := service.app()
+
+	if got := app.Telemetry.ServiceName; got != "example" {
+		t.Fatalf("Telemetry.ServiceName=%q want example", got)
 	}
 }

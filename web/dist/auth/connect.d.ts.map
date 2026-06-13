@@ -1,0 +1,1 @@
+{"version":3,"file":"connect.d.ts","sourceRoot":"","sources":["../../src/auth/connect.ts"],"names":[],"mappings":"AAAA,OAAO,EAAsB,KAAK,WAAW,EAAE,MAAM,qBAAqB,CAAC;AAC3E,OAAO,KAAK,EAAE,gBAAgB,EAAE,MAAM,mBAAmB,CAAC;AAE1D,wBAAgB,qBAAqB,CAAC,YAAY,EAAE,gBAAgB,GAAG,WAAW,CAoBjF"}

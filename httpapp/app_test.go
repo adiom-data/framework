@@ -23,8 +23,8 @@ func TestAppRegistersRoutesConnectAndHealth(t *testing.T) {
 		},
 		Connect: []ConnectService{
 			Connect("example.v1.ExampleService", func(options ...connect.HandlerOption) (string, http.Handler) {
-				if len(options) != 0 {
-					t.Fatalf("options len=%d want 0", len(options))
+				if len(options) != 1 {
+					t.Fatalf("options len=%d want 1", len(options))
 				}
 				return "/example.v1.ExampleService/", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 					_, _ = w.Write([]byte("connect"))
@@ -58,6 +58,63 @@ func TestAppRegistersRoutesConnectAndHealth(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/grpc.health.v1.Health/Check", nil))
 	if rec.Code == http.StatusNotFound {
 		t.Fatal("default health was not mounted")
+	}
+}
+
+func TestAppCanDisableConnectTelemetry(t *testing.T) {
+	t.Setenv("OTEL_SDK_DISABLED", "true")
+	app := App{
+		Logger: testLogger(),
+		Connect: []ConnectService{
+			Connect("example.v1.ExampleService", func(options ...connect.HandlerOption) (string, http.Handler) {
+				if len(options) != 0 {
+					t.Fatalf("options len=%d want 0", len(options))
+				}
+				return "/example.v1.ExampleService/", http.NotFoundHandler()
+			}),
+		},
+	}
+
+	_ = app.Handler()
+}
+
+func TestConnectHandlerWrapsGeneratedHandler(t *testing.T) {
+	type serviceImpl struct {
+		name string
+	}
+	impl := serviceImpl{name: "api"}
+	called := false
+
+	service := ConnectHandler(
+		"example.v1.ExampleService",
+		func(got serviceImpl, options ...connect.HandlerOption) (string, http.Handler) {
+			called = true
+			if got != impl {
+				t.Fatalf("implementation=%v want %v", got, impl)
+			}
+			if len(options) != 1 {
+				t.Fatalf("options len=%d want 1", len(options))
+			}
+			return "/example.v1.ExampleService/", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(got.name))
+			})
+		},
+		impl,
+		WithInterceptors(noopInterceptor{}),
+	)
+	app := App{
+		Logger:  testLogger(),
+		Connect: []ConnectService{service},
+	}
+
+	rec := httptest.NewRecorder()
+	app.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/example.v1.ExampleService/Call", nil))
+
+	if !called {
+		t.Fatal("generated handler was not called")
+	}
+	if got := rec.Body.String(); got != "api" {
+		t.Fatalf("body=%q want api", got)
 	}
 }
 

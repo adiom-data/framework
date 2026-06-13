@@ -28,9 +28,9 @@ func LogRequests(logger *slog.Logger) Middleware {
 			recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 			start := time.Now()
 			next.ServeHTTP(recorder, r)
-			logger.Info("http request",
+			logger.InfoContext(r.Context(), "http request",
 				"method", r.Method,
-				"path", r.URL.Path,
+				"route", routePattern(r),
 				"status", recorder.status,
 				"duration", time.Since(start),
 			)
@@ -47,8 +47,9 @@ func RecoverPanics(logger *slog.Logger) Middleware {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {
 				if value := recover(); value != nil {
-					logger.Error("http panic",
+					logger.ErrorContext(r.Context(), "http panic",
 						"method", r.Method,
+						"route", routePattern(r),
 						"path", r.URL.Path,
 						"panic", value,
 						"stack", string(debug.Stack()),
@@ -59,6 +60,13 @@ func RecoverPanics(logger *slog.Logger) Middleware {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func routePattern(r *http.Request) string {
+	if r == nil || r.Pattern == "" {
+		return "unknown_route"
+	}
+	return r.Pattern
 }
 
 type statusRecorder struct {

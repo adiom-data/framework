@@ -1,0 +1,32 @@
+{
+  "name": "@adiom-data/framework-web",
+  "version": "0.0.1",
+  "type": "module",
+  "packageManager": "pnpm@10.22.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    "./auth": {
+      "types": "./dist/auth/index.d.ts",
+      "import": "./dist/auth/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "prepare": "npm run build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@connectrpc/connect": "2.1.1",
+    "jwt-decode": "^4.0.0"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

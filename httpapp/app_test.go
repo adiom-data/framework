@@ -23,8 +23,8 @@ func TestAppRegistersRoutesConnectAndHealth(t *testing.T) {
 		},
 		Connect: []ConnectService{
 			Connect("example.v1.ExampleService", func(options ...connect.HandlerOption) (string, http.Handler) {
-				if len(options) != 0 {
-					t.Fatalf("options len=%d want 0", len(options))
+				if len(options) != 1 {
+					t.Fatalf("options len=%d want 1", len(options))
 				}
 				return "/example.v1.ExampleService/", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 					_, _ = w.Write([]byte("connect"))
@@ -59,6 +59,23 @@ func TestAppRegistersRoutesConnectAndHealth(t *testing.T) {
 	if rec.Code == http.StatusNotFound {
 		t.Fatal("default health was not mounted")
 	}
+}
+
+func TestAppCanDisableConnectTelemetry(t *testing.T) {
+	t.Setenv("OTEL_SDK_DISABLED", "true")
+	app := App{
+		Logger: testLogger(),
+		Connect: []ConnectService{
+			Connect("example.v1.ExampleService", func(options ...connect.HandlerOption) (string, http.Handler) {
+				if len(options) != 0 {
+					t.Fatalf("options len=%d want 0", len(options))
+				}
+				return "/example.v1.ExampleService/", http.NotFoundHandler()
+			}),
+		},
+	}
+
+	_ = app.Handler()
 }
 
 func TestAppPassesCommonAndServiceConnectOptions(t *testing.T) {

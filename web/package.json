@@ -1,0 +1,19 @@
+{
+  "name": "@adiom-data/framework-web",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.22.0",
+  "exports": {
+    "./auth": "./src/auth/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@connectrpc/connect": "2.1.1",
+    "jwt-decode": "^4.0.0"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

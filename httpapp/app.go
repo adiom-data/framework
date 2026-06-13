@@ -4,11 +4,13 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
 	httpmiddleware "github.com/adiom-data/framework/httpapp/middleware"
 	"github.com/adiom-data/framework/httpserver"
+	"github.com/adiom-data/framework/telemetry"
 )
 
 // Middleware wraps an HTTP handler. The first middleware in a list is outermost.
@@ -40,6 +42,7 @@ type App struct {
 	ConnectOptions    []connect.HandlerOption
 	Middleware        []Middleware
 	Logger            *slog.Logger
+	Telemetry         telemetry.Config
 	ReadHeaderTimeout time.Duration
 	IdleTimeout       time.Duration
 	ShutdownTimeout   time.Duration
@@ -143,9 +146,10 @@ func (a App) Handler() http.Handler {
 		mux.Handle(route.Pattern, applyMiddleware(route.Handler, route.Middleware...))
 	}
 
+	connectTelemetry := a.connectTelemetryInterceptor()
 	services := make([]httpserver.ConnectService, 0, len(a.Connect))
 	for _, service := range a.Connect {
-		path, handler := service.NewHandler(a.connectOptions(service)...)
+		path, handler := service.NewHandler(a.connectOptions(service, connectTelemetry)...)
 		services = append(services, httpserver.Connect(
 			service.Name,
 			path,
@@ -159,6 +163,7 @@ func (a App) Handler() http.Handler {
 		httpserver.RegisterReflection(mux, serviceNames...)
 	}
 	appHandler := applyMiddleware(mux, a.middleware()...)
+	appHandler = telemetry.Middleware(a.Telemetry, skipPathPrefixes(connectPaths(services...)))(appHandler)
 
 	root := http.NewServeMux()
 	httpserver.RegisterHealth(root, httpserver.Health{
@@ -173,6 +178,17 @@ func (a App) Handler() http.Handler {
 
 // Run assembles and runs the app server.
 func (a App) Run(ctx context.Context) error {
+	shutdown, err := telemetry.Setup(ctx, a.Telemetry)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), a.telemetryShutdownTimeout())
+		defer cancel()
+		if err := shutdown(shutdownCtx); err != nil {
+			a.logger().Warn("telemetry shutdown failed", "error", err)
+		}
+	}()
 	return httpserver.Server{
 		Addr:              a.Addr,
 		Handler:           a.Handler(),
@@ -183,10 +199,13 @@ func (a App) Run(ctx context.Context) error {
 	}.Run(ctx)
 }
 
-func (a App) connectOptions(service ConnectService) []connect.HandlerOption {
+func (a App) connectOptions(service ConnectService, telemetryInterceptor connect.Interceptor) []connect.HandlerOption {
 	options := make([]connect.HandlerOption, 0, len(a.ConnectOptions)+len(service.ConnectOptions)+1)
 	options = append(options, a.ConnectOptions...)
-	interceptors := make([]connect.Interceptor, 0, len(a.Interceptors)+len(service.Interceptors))
+	interceptors := make([]connect.Interceptor, 0, len(a.Interceptors)+len(service.Interceptors)+1)
+	if telemetryInterceptor != nil {
+		interceptors = append(interceptors, telemetryInterceptor)
+	}
 	interceptors = append(interceptors, a.Interceptors...)
 	interceptors = append(interceptors, service.Interceptors...)
 	if len(interceptors) > 0 {
@@ -194,6 +213,15 @@ func (a App) connectOptions(service ConnectService) []connect.HandlerOption {
 	}
 	options = append(options, service.ConnectOptions...)
 	return options
+}
+
+func (a App) connectTelemetryInterceptor() connect.Interceptor {
+	interceptor, err := telemetry.ConnectInterceptor(a.Telemetry)
+	if err != nil {
+		a.logger().Warn("connect telemetry disabled", "error", err)
+		return nil
+	}
+	return interceptor
 }
 
 func (a App) middleware() []Middleware {
@@ -210,6 +238,13 @@ func (a App) logger() *slog.Logger {
 	return slog.Default()
 }
 
+func (a App) telemetryShutdownTimeout() time.Duration {
+	if a.Telemetry.ShutdownTimeout > 0 {
+		return a.Telemetry.ShutdownTimeout
+	}
+	return telemetry.DefaultShutdownTimeout
+}
+
 func applyMiddleware(handler http.Handler, middleware ...Middleware) http.Handler {
 	for i := len(middleware) - 1; i >= 0; i-- {
 		if middleware[i] != nil {
@@ -217,4 +252,25 @@ func applyMiddleware(handler http.Handler, middleware ...Middleware) http.Handle
 		}
 	}
 	return handler
+}
+
+func connectPaths(services ...httpserver.ConnectService) []string {
+	paths := make([]string, 0, len(services))
+	for _, service := range services {
+		if service.Path != "" {
+			paths = append(paths, service.Path)
+		}
+	}
+	return paths
+}
+
+func skipPathPrefixes(prefixes []string) func(*http.Request) bool {
+	return func(r *http.Request) bool {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(r.URL.Path, prefix) {
+				return false
+			}
+		}
+		return true
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/adiom-data/framework/telemetry"
 )
 
 // ServiceOption customizes a Service.
@@ -24,6 +25,7 @@ type Service struct {
 	ConnectOptions    []connect.HandlerOption
 	Middleware        []Middleware
 	Logger            *slog.Logger
+	Telemetry         telemetry.Config
 	ReadHeaderTimeout time.Duration
 	IdleTimeout       time.Duration
 	ShutdownTimeout   time.Duration
@@ -108,6 +110,13 @@ func WithServiceLogger(logger *slog.Logger) ServiceOption {
 	}
 }
 
+// WithServiceTelemetry overrides the service OpenTelemetry configuration.
+func WithServiceTelemetry(cfg telemetry.Config) ServiceOption {
+	return func(service *Service) {
+		service.Telemetry = cfg
+	}
+}
+
 // WithServiceTimeouts overrides server timeouts.
 func WithServiceTimeouts(readHeaderTimeout, shutdownTimeout time.Duration) ServiceOption {
 	return func(service *Service) {
@@ -145,6 +154,7 @@ func (s Service) app() App {
 		ConnectOptions:    s.ConnectOptions,
 		Middleware:        s.Middleware,
 		Logger:            s.Logger,
+		Telemetry:         s.Telemetry,
 		ReadHeaderTimeout: s.ReadHeaderTimeout,
 		IdleTimeout:       s.IdleTimeout,
 		ShutdownTimeout:   s.ShutdownTimeout,

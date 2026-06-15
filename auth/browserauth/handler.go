@@ -24,9 +24,10 @@ type HandlerConfig struct {
 	RefreshLeeway time.Duration
 	SessionTTL    time.Duration
 
-	SuccessRedirect string
-	LogoutRedirect  string
-	Now             func() time.Time
+	SuccessRedirect     string
+	LogoutRedirect      string
+	InvalidStateHandler InvalidStateHandler
+	Now                 func() time.Time
 }
 
 // Handler returns a composed browser auth handler with /login, /callback,
@@ -35,7 +36,10 @@ func (b *BrowserAuth) Handler(cfg HandlerConfig) http.Handler {
 	cfg.Cookie = cfg.Cookie.withDefaultPath(cfg.BasePath)
 	mux := http.NewServeMux()
 	mux.Handle("/login", b.LoginHandler())
-	mux.Handle("/callback", b.CallbackHandler(b.sessionCallback(cfg)))
+	mux.Handle("/callback", b.CallbackHandlerWithConfig(CallbackHandlerConfig{
+		Callback:            b.sessionCallback(cfg),
+		InvalidStateHandler: cfg.InvalidStateHandler,
+	}))
 	mux.Handle("/token", TokenEndpoint{
 		Store:         cfg.Store,
 		Cookie:        cfg.Cookie,

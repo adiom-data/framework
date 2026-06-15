@@ -169,6 +169,32 @@ handler := browserAuth.Handler(browserauth.HandlerConfig{
 mux.Handle("/auth/", http.StripPrefix("/auth", handler))
 ```
 
+Set `browserauth.Config.RedirectURL` when the public callback URL is fixed and
+known at startup:
+
+```go
+browserauth.Config{
+	// ...
+	RedirectURL: "https://app.example.com/auth/callback",
+}
+```
+
+If the callback URL depends on the request host, forwarded headers, or another
+runtime policy, use `RedirectURLResolver`. The same resolved URL is used for
+both the provider authorization redirect and callback token exchange:
+
+```go
+browserauth.Config{
+	// ...
+	RedirectURLResolver: browserauth.PublicRedirectURL("/auth/callback"),
+}
+```
+
+`PublicRedirectURL` builds from `httputil.PublicBaseURL`, which honors
+`Forwarded`, `X-Forwarded-Proto`, and `X-Forwarded-Host`. Only use those headers
+behind trusted proxy/gateway configuration. Apps that support only certain
+public hosts should wrap the resolver with their own allowlist check.
+
 When `SessionCookie.Path` is empty, the composed handler defaults it to
 `BasePath`, so the browser session cookie is scoped to the auth mount.
 When `Issuer` is set, the composed handler also serves the matching discovery
@@ -207,7 +233,53 @@ implement `browserauth.SessionUpdateStore` to coordinate concurrent refreshes;
 Browser auth cookies default to `HttpOnly`, `Secure`, and `SameSite=Lax`.
 Local HTTP development can opt into insecure cookies explicitly. The temporary
 OAuth state/PKCE cookie is signed and encrypted. For multiple replicas, provide
-stable `CookieStateStore.Codecs` so callbacks can be verified by any replica.
+stable state keys so callbacks can be verified by any replica. The usual path
+is to store one high-entropy seed and derive the cookie keys from it:
+
+```go
+stateKeys, err := browserauth.CookieStateKeysFromSeedBase64(
+	os.Getenv("BROWSER_AUTH_STATE_SEED"),
+)
+if err != nil {
+	return err
+}
+browserAuth, err := browserauth.New(ctx, browserauth.Config{
+	// ...
+	StateKeys: stateKeys,
+})
+```
+
+Generate the seed once, then store it in your normal secret manager as a base64
+string:
+
+```go
+seed, err := browserauth.GenerateCookieStateSeedSecret()
+if err != nil {
+	return err
+}
+fmt.Println("BROWSER_AUTH_STATE_SEED=" + seed)
+```
+
+The seed should be random secret material, not a predictable name or ID. Apps
+that already manage separate key material can also use
+`browserauth.CookieStateKeysFromBase64(hashKey, blockKey)`.
+
+When no stable keys are configured, the framework uses process-local random
+keys, which is fine for single-process development but not for multiple
+replicas.
+Apps that need to customize the state cookie name, path, or SameSite policy can
+instead pass `StateStore: browserauth.CookieStateStore{Keys: stateKeys, ...}`.
+
+Missing, stale, or tampered callback state is rejected before token exchange.
+By default the callback returns `400` for compatibility. Apps that want a
+friendlier recovery path can redirect those failures:
+
+```go
+handler := browserAuth.Handler(browserauth.HandlerConfig{
+	// ...
+	InvalidStateHandler: browserauth.RedirectInvalidState("/auth/login"),
+})
+```
 
 CORS is intentionally not handled in `browserauth`. Prefer same-host `/auth`
 mounts. If `/auth/token` is cross-origin, configure CORS at the gateway or

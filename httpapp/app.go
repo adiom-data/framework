@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -203,13 +204,23 @@ func (a App) Run(ctx context.Context) error {
 		}
 	}()
 	return httpserver.Server{
-		Addr:              a.Addr,
+		Addr:              a.addr(),
 		Handler:           a.Handler(),
 		Logger:            a.logger(),
 		ReadHeaderTimeout: a.ReadHeaderTimeout,
 		IdleTimeout:       a.IdleTimeout,
 		ShutdownTimeout:   a.ShutdownTimeout,
 	}.Run(ctx)
+}
+
+func (a App) addr() string {
+	if strings.TrimSpace(a.Addr) != "" {
+		return strings.TrimSpace(a.Addr)
+	}
+	if port := strings.TrimSpace(os.Getenv("PORT")); port != "" {
+		return ":" + port
+	}
+	return DefaultAddr
 }
 
 func (a App) connectOptions(service ConnectService, telemetryInterceptor connect.Interceptor) []connect.HandlerOption {

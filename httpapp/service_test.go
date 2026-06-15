@@ -66,3 +66,28 @@ func TestServiceTelemetryOption(t *testing.T) {
 		t.Fatalf("Telemetry.ServiceName=%q want example", got)
 	}
 }
+
+func TestAppAddrUsesExplicitAddr(t *testing.T) {
+	t.Setenv("PORT", "9090")
+	app := App{Addr: ":7070"}
+
+	if got := app.addr(); got != ":7070" {
+		t.Fatalf("addr=%q want explicit addr", got)
+	}
+}
+
+func TestAppAddrUsesPortEnv(t *testing.T) {
+	t.Setenv("PORT", "9090")
+
+	if got := (App{}).addr(); got != ":9090" {
+		t.Fatalf("addr=%q want :9090", got)
+	}
+}
+
+func TestAppAddrUsesDefault(t *testing.T) {
+	t.Setenv("PORT", "")
+
+	if got := (App{}).addr(); got != DefaultAddr {
+		t.Fatalf("addr=%q want %q", got, DefaultAddr)
+	}
+}

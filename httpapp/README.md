@@ -102,7 +102,8 @@ the service shares the runtime telemetry configuration.
 
 Reflection is explicit and disabled by default.
 
-If `Addr` is empty, the app listens on `:8080`.
+If `Addr` is empty, the app listens on `:$PORT` when `PORT` is set, otherwise
+`:8080`.
 
 ## Telemetry
 
@@ -185,6 +186,17 @@ logger := telemetry.NewLogger(
 
 By default, unsampled traces suppress logs below `Warn`; warnings, errors,
 sampled traces, and logs without trace context still emit.
+
+The default logger installed by `httpapp.Init` also honors:
+
+```text
+LOG_LEVEL=debug|info|warn|error
+LOG_UNSAMPLED_MIN_LEVEL=debug|info|warn|error|off
+```
+
+`LOG_LEVEL` is the global minimum log level. `LOG_UNSAMPLED_MIN_LEVEL` adds a
+separate minimum for records whose context contains a valid unsampled trace; set
+it to `off` to suppress all such records.
 
 Request-specific log fields live in `ctx`. Use `ContextWithLogAttrs` as
 middleware and handlers learn more scope, then log normally with any wrapped

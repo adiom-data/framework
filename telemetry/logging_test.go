@@ -246,3 +246,80 @@ func TestSampledLogHandlerUsesLoggerWithContextSamplingDecision(t *testing.T) {
 		t.Fatalf("context-less warn log missing sampled decision: %s", log)
 	}
 }
+
+func TestDefaultLoggerUsesLogLevelEnv(t *testing.T) {
+	t.Setenv("LOG_LEVEL", "warn")
+	t.Setenv("LOG_UNSAMPLED_MIN_LEVEL", "")
+
+	var output bytes.Buffer
+	logger := defaultLogger(&output)
+
+	logger.InfoContext(context.Background(), "dropped")
+	if got := output.String(); got != "" {
+		t.Fatalf("info log was emitted: %s", got)
+	}
+	logger.WarnContext(context.Background(), "kept")
+	if log := output.String(); !strings.Contains(log, `"msg":"kept"`) {
+		t.Fatalf("warn log was not emitted: %s", log)
+	}
+}
+
+func TestDefaultLoggerUsesUnsampledMinimumLevelEnv(t *testing.T) {
+	t.Setenv("LOG_LEVEL", "")
+	t.Setenv("LOG_UNSAMPLED_MIN_LEVEL", "warn")
+
+	var output bytes.Buffer
+	logger := defaultLogger(&output)
+	ctx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b},
+		SpanID:  trace.SpanID{0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c},
+	}))
+
+	logger.InfoContext(ctx, "dropped")
+	if got := output.String(); got != "" {
+		t.Fatalf("unsampled info log was emitted: %s", got)
+	}
+	logger.WarnContext(ctx, "kept")
+	if log := output.String(); !strings.Contains(log, `"msg":"kept"`) {
+		t.Fatalf("unsampled warn log was not emitted: %s", log)
+	}
+}
+
+func TestDefaultLoggerCanDropUnsampledLogs(t *testing.T) {
+	t.Setenv("LOG_LEVEL", "")
+	t.Setenv("LOG_UNSAMPLED_MIN_LEVEL", "off")
+
+	var output bytes.Buffer
+	logger := defaultLogger(&output)
+	ctx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{0x0d, 0x0d, 0x0d, 0x0d, 0x0d, 0x0d, 0x0d, 0x0d, 0x0d, 0x0d, 0x0d, 0x0d, 0x0d, 0x0d, 0x0d, 0x0d},
+		SpanID:  trace.SpanID{0x0e, 0x0e, 0x0e, 0x0e, 0x0e, 0x0e, 0x0e, 0x0e},
+	}))
+
+	logger.ErrorContext(ctx, "dropped")
+	if got := output.String(); got != "" {
+		t.Fatalf("unsampled error log was emitted: %s", got)
+	}
+}
+
+func TestParseLogLevel(t *testing.T) {
+	tests := map[string]slog.Level{
+		"debug":   slog.LevelDebug,
+		"info":    slog.LevelInfo,
+		"warn":    slog.LevelWarn,
+		"warning": slog.LevelWarn,
+		"error":   slog.LevelError,
+	}
+	for input, want := range tests {
+		got, ok := parseLogLevel(input)
+		if !ok {
+			t.Fatalf("parseLogLevel(%q) failed", input)
+		}
+		if got != want {
+			t.Fatalf("parseLogLevel(%q)=%v want %v", input, got, want)
+		}
+	}
+	if _, ok := parseLogLevel("nope"); ok {
+		t.Fatal("parseLogLevel succeeded for invalid level")
+	}
+}

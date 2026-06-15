@@ -2,8 +2,10 @@ package telemetry
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"os"
+	"strings"
 
 	"go.opentelemetry.io/otel/trace"
 )
@@ -32,7 +34,7 @@ func NewSampledLogger(next slog.Handler, opts ...SampledLogOption) *slog.Logger 
 // DefaultLogger returns the framework structured logger for stdout log
 // collection.
 func DefaultLogger() *slog.Logger {
-	return NewLogger(slog.NewJSONHandler(os.Stdout, nil))
+	return defaultLogger(os.Stdout)
 }
 
 type logAttrsContextKey struct{}
@@ -92,7 +94,8 @@ func (h traceLogHandler) WithGroup(name string) slog.Handler {
 type SampledLogOption func(*sampledLogConfig)
 
 type sampledLogConfig struct {
-	minLevel slog.Level
+	minLevel      slog.Level
+	dropUnsampled bool
 }
 
 // WithSampledLogMinimumLevel sets the lowest log level that always passes
@@ -100,6 +103,14 @@ type sampledLogConfig struct {
 func WithSampledLogMinimumLevel(level slog.Level) SampledLogOption {
 	return func(cfg *sampledLogConfig) {
 		cfg.minLevel = level
+	}
+}
+
+// WithoutUnsampledLogs suppresses every record whose ctx contains a valid
+// unsampled trace.
+func WithoutUnsampledLogs() SampledLogOption {
+	return func(cfg *sampledLogConfig) {
+		cfg.dropUnsampled = true
 	}
 }
 
@@ -151,17 +162,24 @@ func (h sampledLogHandler) WithGroup(name string) slog.Handler {
 }
 
 func (h sampledLogHandler) shouldLog(ctx context.Context, level slog.Level) bool {
-	if level >= h.cfg.minLevel {
-		return true
-	}
 	spanContext := trace.SpanContextFromContext(ctx)
 	if spanContext.IsValid() {
-		return spanContext.IsSampled()
+		return h.shouldLogSampledDecision(spanContext.IsSampled(), level)
 	}
 	if h.traceSampled != nil {
-		return *h.traceSampled
+		return h.shouldLogSampledDecision(*h.traceSampled, level)
 	}
 	return true
+}
+
+func (h sampledLogHandler) shouldLogSampledDecision(sampled bool, level slog.Level) bool {
+	if sampled {
+		return true
+	}
+	if h.cfg.dropUnsampled {
+		return false
+	}
+	return level >= h.cfg.minLevel
 }
 
 func traceSampledAttr(attrs []slog.Attr) (bool, bool) {
@@ -227,4 +245,50 @@ func attrsToArgs(attrs []slog.Attr) []any {
 		args = append(args, attr)
 	}
 	return args
+}
+
+func defaultLogger(output io.Writer) *slog.Logger {
+	handlerOptions := &slog.HandlerOptions{}
+	if level, ok := logLevelFromEnv("LOG_LEVEL"); ok {
+		handlerOptions.Level = level
+	}
+	handler := slog.NewJSONHandler(output, handlerOptions)
+	if opts, ok := unsampledLogOptionsFromEnv(); ok {
+		return NewLogger(SampledLogHandler(handler, opts...))
+	}
+	return NewLogger(handler)
+}
+
+func unsampledLogOptionsFromEnv() ([]SampledLogOption, bool) {
+	value := strings.TrimSpace(os.Getenv("LOG_UNSAMPLED_MIN_LEVEL"))
+	if value == "" {
+		return nil, false
+	}
+	if strings.EqualFold(value, "off") || strings.EqualFold(value, "none") || strings.EqualFold(value, "disabled") {
+		return []SampledLogOption{WithoutUnsampledLogs()}, true
+	}
+	level, ok := parseLogLevel(value)
+	if !ok {
+		return nil, false
+	}
+	return []SampledLogOption{WithSampledLogMinimumLevel(level)}, true
+}
+
+func logLevelFromEnv(name string) (slog.Level, bool) {
+	return parseLogLevel(os.Getenv(name))
+}
+
+func parseLogLevel(value string) (slog.Level, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "debug":
+		return slog.LevelDebug, true
+	case "info":
+		return slog.LevelInfo, true
+	case "warn", "warning":
+		return slog.LevelWarn, true
+	case "error":
+		return slog.LevelError, true
+	default:
+		return 0, false
+	}
 }

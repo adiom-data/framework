@@ -98,6 +98,45 @@ issuer, err := tokenissuer.New(tokenissuer.Config{
 The active key signs new tokens. JWKS publishes every configured public key, so
 old tokens remain verifiable until they expire.
 
+## Protected Connect APIs
+
+Backend services can verify application bearer tokens with a protocol-neutral
+authenticator and a thin Connect interceptor:
+
+```go
+authenticator := tokenissuer.NewBearerAuthenticator(
+	issuer,
+	tokenissuer.RequireScopes("sample:read"),
+	tokenissuer.WithAuthValue(func(_ context.Context, claims *tokenissuer.Claims) (*samplev1.User, error) {
+		return &samplev1.User{
+			Id:     claims.Subject,
+			Email:  claims.Attributes["email"],
+			Name:   claims.Attributes["name"],
+			Scopes: claims.Scopes,
+		}, nil
+	}),
+)
+
+service := runtime.NewService(
+	httpapp.WithServiceInterceptors(tokenissuer.ConnectAuth(authenticator)),
+)
+```
+
+`BearerAuthenticator.Authenticate` owns extraction, verification, generic policy,
+and context storage. `ConnectAuth` only adapts that result to Connect headers and
+Connect error codes. Handlers can read the generic claims or identity:
+
+```go
+claims, ok := tokenissuer.ClaimsFromContext(ctx)
+identity, ok := tokenissuer.IdentityFromContext(ctx)
+```
+
+Apps that need their own representation can read the mapped value:
+
+```go
+user, ok := tokenissuer.AuthValueFromContext[*samplev1.User](ctx)
+```
+
 ## Browser Auth
 
 Experimental: prefer direct SPA OIDC plus `AuthService.ExchangeCredential` until

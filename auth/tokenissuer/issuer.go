@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -25,25 +26,30 @@ const DefaultTTL = 10 * time.Minute
 type Config struct {
 	Issuer      string
 	Audience    string
+	Algorithm   jose.SignatureAlgorithm
 	ActiveKeyID string
 	Keys        []SigningKey
 	TTL         time.Duration
 }
 
-// SigningKey is an Ed25519 signing key published in the issuer JWKS.
+// SigningKey is a signing key published in the issuer JWKS.
 type SigningKey struct {
-	KeyID      string
-	PrivateKey ed25519.PrivateKey
-	PublicKey  ed25519.PublicKey
+	KeyID         string
+	Algorithm     jose.SignatureAlgorithm
+	PrivateKey    ed25519.PrivateKey
+	PublicKey     ed25519.PublicKey
+	RSAPrivateKey *rsa.PrivateKey
+	RSAPublicKey  *rsa.PublicKey
 }
 
 type issuerKey struct {
 	keyID      string
-	privateKey ed25519.PrivateKey
-	publicKey  ed25519.PublicKey
+	algorithm  jose.SignatureAlgorithm
+	privateKey any
+	publicKey  any
 }
 
-// Issuer mints and verifies short-lived EdDSA access tokens.
+// Issuer mints and verifies short-lived access tokens.
 type Issuer struct {
 	issuer    string
 	audience  string
@@ -161,7 +167,7 @@ func NewFromBase64(cfg Config, keyID string, privateKeyBase64 string) (*Issuer, 
 	if err != nil {
 		return nil, err
 	}
-	cfg.Keys = append(cfg.Keys, SigningKey{KeyID: keyID, PrivateKey: privateKey})
+	cfg.Keys = append(cfg.Keys, SigningKey{KeyID: keyID, Algorithm: jose.EdDSA, PrivateKey: privateKey})
 	return New(cfg)
 }
 
@@ -181,6 +187,11 @@ func NewFromFile(cfg Config, keyID string, privateKeyFile string) (*Issuer, erro
 func GeneratePrivateKey() (ed25519.PrivateKey, error) {
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	return privateKey, err
+}
+
+// GenerateRSAPrivateKey returns a new RSA private key for RS256 signing.
+func GenerateRSAPrivateKey() (*rsa.PrivateKey, error) {
+	return rsa.GenerateKey(rand.Reader, 2048)
 }
 
 // EncodePrivateKey encodes an Ed25519 private key for config storage.
@@ -243,7 +254,7 @@ func (i *Issuer) Mint(ctx context.Context, identity auth.Identity) (string, time
 	}
 	opts := (&jose.SignerOptions{}).WithType("JWT")
 	opts.WithHeader("kid", i.activeKey.keyID)
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: i.activeKey.privateKey}, opts)
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: i.activeKey.algorithm, Key: i.activeKey.privateKey}, opts)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -259,7 +270,7 @@ func (i *Issuer) Verify(token string) (*Claims, error) {
 	if i == nil {
 		return nil, errors.New("tokenissuer: issuer is not configured")
 	}
-	parsed, err := josejwt.ParseSigned(token, []jose.SignatureAlgorithm{jose.EdDSA})
+	parsed, err := josejwt.ParseSigned(token, i.supportedAlgorithms())
 	if err != nil {
 		return nil, err
 	}
@@ -308,6 +319,19 @@ func signedKeyID(token *josejwt.JSONWebToken) string {
 	return token.Headers[0].KeyID
 }
 
+func (i *Issuer) supportedAlgorithms() []jose.SignatureAlgorithm {
+	seen := map[jose.SignatureAlgorithm]struct{}{}
+	var algorithms []jose.SignatureAlgorithm
+	for _, key := range i.keys {
+		if _, ok := seen[key.algorithm]; ok {
+			continue
+		}
+		seen[key.algorithm] = struct{}{}
+		algorithms = append(algorithms, key.algorithm)
+	}
+	return algorithms
+}
+
 // JWKSHandler publishes the issuer public key as a JWKS.
 func (i *Issuer) JWKSHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -329,26 +353,46 @@ func (i *Issuer) Metadata() Metadata {
 	return Metadata{
 		Issuer:                           i.issuer,
 		JWKSURI:                          i.issuer + "/.well-known/jwks.json",
-		IDTokenSigningAlgValuesSupported: []string{string(jose.EdDSA)},
+		IDTokenSigningAlgValuesSupported: i.supportedAlgorithmNames(),
 	}
+}
+
+func (i *Issuer) supportedAlgorithmNames() []string {
+	algorithms := i.supportedAlgorithms()
+	out := make([]string, 0, len(algorithms))
+	for _, algorithm := range algorithms {
+		out = append(out, string(algorithm))
+	}
+	return out
 }
 
 // JWKS returns the issuer public key as a JSON Web Key Set.
 func (i *Issuer) JWKS() map[string]any {
-	keys := make([]map[string]string, 0, len(i.keys))
+	keys := make([]map[string]any, 0, len(i.keys))
 	for _, key := range i.keys {
-		keys = append(keys, map[string]string{
-			"kty": "OKP",
-			"crv": "Ed25519",
-			"kid": key.keyID,
-			"use": "sig",
-			"alg": string(jose.EdDSA),
-			"x":   base64.RawURLEncoding.EncodeToString(key.publicKey),
-		})
+		keys = append(keys, key.jwk())
 	}
 	return map[string]any{
 		"keys": keys,
 	}
+}
+
+func (k issuerKey) jwk() map[string]any {
+	key := jose.JSONWebKey{
+		Key:       k.publicKey,
+		KeyID:     k.keyID,
+		Algorithm: string(k.algorithm),
+		Use:       "sig",
+	}
+	data, err := json.Marshal(key)
+	if err != nil {
+		return map[string]any{}
+	}
+	out := map[string]any{}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return map[string]any{}
+	}
+	return out
 }
 
 func normalizeKeys(cfg Config) ([]issuerKey, issuerKey, error) {
@@ -356,42 +400,22 @@ func normalizeKeys(cfg Config) ([]issuerKey, issuerKey, error) {
 	if len(signingKeys) == 0 {
 		return nil, issuerKey{}, errors.New("tokenissuer: at least one signing key is required")
 	}
+	defaultAlgorithm := signingAlgorithm(cfg.Algorithm)
+	if err := validateSigningAlgorithm(defaultAlgorithm); err != nil {
+		return nil, issuerKey{}, err
+	}
 	keys := make([]issuerKey, 0, len(signingKeys))
 	seen := map[string]struct{}{}
 	for _, signingKey := range signingKeys {
-		keyID := strings.TrimSpace(signingKey.KeyID)
-		if keyID == "" {
-			return nil, issuerKey{}, errors.New("tokenissuer: key id is required")
+		key, err := normalizeSigningKey(signingKey, defaultAlgorithm)
+		if err != nil {
+			return nil, issuerKey{}, err
 		}
-		if _, ok := seen[keyID]; ok {
-			return nil, issuerKey{}, fmt.Errorf("tokenissuer: duplicate key id %q", keyID)
+		if _, ok := seen[key.keyID]; ok {
+			return nil, issuerKey{}, fmt.Errorf("tokenissuer: duplicate key id %q", key.keyID)
 		}
-		seen[keyID] = struct{}{}
-		publicKey := signingKey.PublicKey
-		privateKey := signingKey.PrivateKey
-		if len(privateKey) != 0 {
-			if len(privateKey) != ed25519.PrivateKeySize {
-				return nil, issuerKey{}, fmt.Errorf("tokenissuer: private key %q must be %d bytes", keyID, ed25519.PrivateKeySize)
-			}
-			derivedPublicKey, ok := privateKey.Public().(ed25519.PublicKey)
-			if !ok {
-				return nil, issuerKey{}, fmt.Errorf("tokenissuer: invalid public key for %q", keyID)
-			}
-			if len(publicKey) == 0 {
-				publicKey = derivedPublicKey
-			}
-			if !bytes.Equal(publicKey, derivedPublicKey) {
-				return nil, issuerKey{}, fmt.Errorf("tokenissuer: public key does not match private key for %q", keyID)
-			}
-		}
-		if len(publicKey) != ed25519.PublicKeySize {
-			return nil, issuerKey{}, fmt.Errorf("tokenissuer: public key %q must be %d bytes", keyID, ed25519.PublicKeySize)
-		}
-		keys = append(keys, issuerKey{
-			keyID:      keyID,
-			privateKey: privateKey,
-			publicKey:  publicKey,
-		})
+		seen[key.keyID] = struct{}{}
+		keys = append(keys, key)
 	}
 	activeKeyID := strings.TrimSpace(cfg.ActiveKeyID)
 	if activeKeyID == "" {
@@ -399,13 +423,117 @@ func normalizeKeys(cfg Config) ([]issuerKey, issuerKey, error) {
 	}
 	for _, key := range keys {
 		if key.keyID == activeKeyID {
-			if len(key.privateKey) != ed25519.PrivateKeySize {
+			if key.privateKey == nil {
 				return nil, issuerKey{}, fmt.Errorf("tokenissuer: active key %q requires a private key", activeKeyID)
 			}
 			return keys, key, nil
 		}
 	}
 	return nil, issuerKey{}, fmt.Errorf("tokenissuer: active key %q not found", activeKeyID)
+}
+
+func normalizeSigningKey(signingKey SigningKey, defaultAlgorithm jose.SignatureAlgorithm) (issuerKey, error) {
+	keyID := strings.TrimSpace(signingKey.KeyID)
+	if keyID == "" {
+		return issuerKey{}, errors.New("tokenissuer: key id is required")
+	}
+	algorithm := signingAlgorithm(signingKey.Algorithm)
+	if signingKey.Algorithm == "" {
+		algorithm = defaultAlgorithm
+	}
+	if err := validateSigningAlgorithm(algorithm); err != nil {
+		return issuerKey{}, err
+	}
+	switch algorithm {
+	case jose.EdDSA:
+		return normalizeEdDSAKey(keyID, signingKey)
+	case jose.RS256:
+		return normalizeRS256Key(keyID, signingKey)
+	default:
+		return issuerKey{}, fmt.Errorf("tokenissuer: unsupported signing algorithm %q", algorithm)
+	}
+}
+
+func normalizeEdDSAKey(keyID string, signingKey SigningKey) (issuerKey, error) {
+	publicKey := signingKey.PublicKey
+	privateKey := signingKey.PrivateKey
+	if len(privateKey) != 0 {
+		if len(privateKey) != ed25519.PrivateKeySize {
+			return issuerKey{}, fmt.Errorf("tokenissuer: private key %q must be %d bytes", keyID, ed25519.PrivateKeySize)
+		}
+		derivedPublicKey, ok := privateKey.Public().(ed25519.PublicKey)
+		if !ok {
+			return issuerKey{}, fmt.Errorf("tokenissuer: invalid public key for %q", keyID)
+		}
+		if len(publicKey) == 0 {
+			publicKey = derivedPublicKey
+		}
+		if !bytes.Equal(publicKey, derivedPublicKey) {
+			return issuerKey{}, fmt.Errorf("tokenissuer: public key does not match private key for %q", keyID)
+		}
+	}
+	if len(publicKey) != ed25519.PublicKeySize {
+		return issuerKey{}, fmt.Errorf("tokenissuer: public key %q must be %d bytes", keyID, ed25519.PublicKeySize)
+	}
+	var private any
+	if len(privateKey) > 0 {
+		private = privateKey
+	}
+	return issuerKey{
+		keyID:      keyID,
+		algorithm:  jose.EdDSA,
+		privateKey: private,
+		publicKey:  publicKey,
+	}, nil
+}
+
+func normalizeRS256Key(keyID string, signingKey SigningKey) (issuerKey, error) {
+	publicKey := signingKey.RSAPublicKey
+	privateKey := signingKey.RSAPrivateKey
+	if privateKey != nil {
+		if err := privateKey.Validate(); err != nil {
+			return issuerKey{}, fmt.Errorf("tokenissuer: RSA private key %q is invalid: %w", keyID, err)
+		}
+		derivedPublicKey := &privateKey.PublicKey
+		if publicKey == nil {
+			publicKey = derivedPublicKey
+		}
+		if !equalRSAPublicKeys(publicKey, derivedPublicKey) {
+			return issuerKey{}, fmt.Errorf("tokenissuer: RSA public key does not match private key for %q", keyID)
+		}
+	}
+	if publicKey == nil {
+		return issuerKey{}, fmt.Errorf("tokenissuer: RSA public key %q is required", keyID)
+	}
+	return issuerKey{
+		keyID:      keyID,
+		algorithm:  jose.RS256,
+		privateKey: privateKey,
+		publicKey:  publicKey,
+	}, nil
+}
+
+func signingAlgorithm(algorithm jose.SignatureAlgorithm) jose.SignatureAlgorithm {
+	if algorithm == "" {
+		return jose.EdDSA
+	}
+	return algorithm
+}
+
+func validateSigningAlgorithm(algorithm jose.SignatureAlgorithm) error {
+	switch algorithm {
+	case jose.EdDSA, jose.RS256:
+		return nil
+	default:
+		return fmt.Errorf("tokenissuer: unsupported signing algorithm %q", algorithm)
+	}
+}
+
+func equalRSAPublicKeys(a, b *rsa.PublicKey) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.E == b.E && a.N.Cmp(b.N) == 0
 }
 
 func keysByID(keys []issuerKey) map[string]issuerKey {

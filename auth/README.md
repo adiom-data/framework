@@ -78,12 +78,27 @@ mux.Handle("/.well-known/openid-configuration", issuer.MetadataHandler())
 mux.Handle("/.well-known/jwks.json", issuer.JWKSHandler())
 ```
 
-The JWT itself is standard: `iss`, `sub`, `iat`, `exp`, optional `aud`, a `kid`
-header, and an EdDSA signature. The default token also includes `scope`,
-`scopes`, and `attributes` claims from `auth.Identity`. Apps can also set
-`auth.Identity.Claims` to mint custom top-level claims. Custom claims cannot use
-registered or framework-reserved names such as `iss`, `sub`, `aud`, `exp`,
-`scope`, `scopes`, or `attributes`.
+The JWT itself is standard: `iss`, `sub`, `iat`, `exp`, optional `aud`, and a
+`kid` header. Tokens are signed with EdDSA by default. The issuer can also be
+configured for RS256:
+
+```go
+rsaKey, err := tokenissuer.GenerateRSAPrivateKey()
+issuer, err := tokenissuer.New(tokenissuer.Config{
+	Issuer:      "https://app.example.com/auth",
+	Algorithm:   jose.RS256,
+	ActiveKeyID: "auth-rsa-2026-06",
+	Keys: []tokenissuer.SigningKey{{
+		KeyID:         "auth-rsa-2026-06",
+		RSAPrivateKey: rsaKey,
+	}},
+})
+```
+
+The default token also includes `scope`, `scopes`, and `attributes` claims from
+`auth.Identity`. Apps can also set `auth.Identity.Claims` to mint custom
+top-level claims. Custom claims cannot use registered or framework-reserved
+names such as `iss`, `sub`, `aud`, `exp`, `scope`, `scopes`, or `attributes`.
 
 For key rotation, configure multiple signing keys and choose the active key:
 

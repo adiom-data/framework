@@ -134,6 +134,71 @@ func TestIssuerAllowsMissingAudienceWhenUnconfigured(t *testing.T) {
 	}
 }
 
+func TestIssuerMintsAndVerifiesRS256Token(t *testing.T) {
+	t.Parallel()
+
+	privateKey, err := GenerateRSAPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer, err := New(Config{
+		Issuer:      "https://auth.example.com/",
+		Audience:    "service",
+		Algorithm:   jose.RS256,
+		ActiveKeyID: "test-key",
+		Keys:        []SigningKey{{KeyID: "test-key", RSAPrivateKey: privateKey}},
+		TTL:         time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := issuer.Mint(context.Background(), auth.Identity{Subject: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var header map[string]any
+	mustDecodeHeader(t, token, &header)
+	if header["alg"] != string(jose.RS256) {
+		t.Fatalf("alg=%v want RS256", header["alg"])
+	}
+	claims, err := issuer.Verify(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Subject != "user-1" {
+		t.Fatalf("subject=%q want user-1", claims.Subject)
+	}
+	jwks := issuer.JWKS()
+	keys := jwks["keys"].([]map[string]any)
+	if keys[0]["kty"] != "RSA" {
+		t.Fatalf("kty=%v want RSA", keys[0]["kty"])
+	}
+	if keys[0]["alg"] != string(jose.RS256) {
+		t.Fatalf("jwk alg=%v want RS256", keys[0]["alg"])
+	}
+	if keys[0]["n"] == "" || keys[0]["e"] == "" {
+		t.Fatalf("RSA JWK missing modulus/exponent: %#v", keys[0])
+	}
+}
+
+func TestIssuerRejectsUnsupportedAlgorithm(t *testing.T) {
+	t.Parallel()
+
+	privateKey, err := GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = New(Config{
+		Issuer:      "https://auth.example.com",
+		Algorithm:   jose.HS256,
+		ActiveKeyID: "test-key",
+		Keys:        []SigningKey{{KeyID: "test-key", PrivateKey: privateKey}},
+	})
+	if err == nil {
+		t.Fatal("expected unsupported algorithm error")
+	}
+}
+
 func TestIssuerJWKSHandler(t *testing.T) {
 	t.Parallel()
 
@@ -152,7 +217,7 @@ func TestIssuerJWKSHandler(t *testing.T) {
 	rec := httptest.NewRecorder()
 	issuer.JWKSHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/jwks", nil))
 
-	var jwks map[string][]map[string]string
+	var jwks map[string][]map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &jwks); err != nil {
 		t.Fatal(err)
 	}
@@ -189,6 +254,40 @@ func TestIssuerMetadataHandler(t *testing.T) {
 	if metadata.JWKSURI != "https://auth.example.com/.well-known/jwks.json" {
 		t.Fatalf("jwks_uri=%q", metadata.JWKSURI)
 	}
+	if len(metadata.IDTokenSigningAlgValuesSupported) != 1 || metadata.IDTokenSigningAlgValuesSupported[0] != string(jose.EdDSA) {
+		t.Fatalf("algorithms=%v want EdDSA", metadata.IDTokenSigningAlgValuesSupported)
+	}
+}
+
+func TestIssuerMetadataIncludesConfiguredAlgorithms(t *testing.T) {
+	t.Parallel()
+
+	edKey, err := GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaKey, err := GenerateRSAPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer, err := New(Config{
+		Issuer:      "https://auth.example.com",
+		ActiveKeyID: "rsa",
+		Keys: []SigningKey{
+			{KeyID: "ed", PrivateKey: edKey},
+			{KeyID: "rsa", Algorithm: jose.RS256, RSAPrivateKey: rsaKey},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := issuer.Metadata()
+	if len(metadata.IDTokenSigningAlgValuesSupported) != 2 {
+		t.Fatalf("algorithms=%v want 2", metadata.IDTokenSigningAlgValuesSupported)
+	}
+	if metadata.IDTokenSigningAlgValuesSupported[0] != string(jose.EdDSA) || metadata.IDTokenSigningAlgValuesSupported[1] != string(jose.RS256) {
+		t.Fatalf("algorithms=%v want EdDSA, RS256", metadata.IDTokenSigningAlgValuesSupported)
+	}
 }
 
 func TestIssuerTokensVerifyWithJWTAUTH(t *testing.T) {
@@ -207,6 +306,51 @@ func TestIssuerTokensVerifyWithJWTAUTH(t *testing.T) {
 		Audience:    "service",
 		ActiveKeyID: "test-key",
 		Keys:        []SigningKey{{KeyID: "test-key", PrivateKey: privateKey}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux.Handle("/.well-known/openid-configuration", issuer.MetadataHandler())
+	mux.Handle("/.well-known/jwks.json", issuer.JWKSHandler())
+
+	verifier, err := jwtauth.NewVerifier(jwtauth.Config{
+		Issuer:           server.URL,
+		AllowedAudiences: []string{"service"},
+		HTTPClient:       server.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := issuer.Mint(context.Background(), auth.Identity{Subject: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := verifier.Verify(context.Background(), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Subject != "user-1" {
+		t.Fatalf("subject=%q want user-1", claims.Subject)
+	}
+}
+
+func TestIssuerRS256TokensVerifyWithJWTAUTH(t *testing.T) {
+	t.Parallel()
+
+	privateKey, err := GenerateRSAPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	issuer, err := New(Config{
+		Issuer:      server.URL,
+		Audience:    "service",
+		Algorithm:   jose.RS256,
+		ActiveKeyID: "test-key",
+		Keys:        []SigningKey{{KeyID: "test-key", RSAPrivateKey: privateKey}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -289,7 +433,7 @@ func TestIssuerSupportsMultipleKeys(t *testing.T) {
 		t.Fatalf("new subject=%q want new-user", newClaims.Subject)
 	}
 	jwks := issuer.JWKS()
-	keys := jwks["keys"].([]map[string]string)
+	keys := jwks["keys"].([]map[string]any)
 	if len(keys) != 2 {
 		t.Fatalf("keys=%d want 2", len(keys))
 	}
@@ -383,6 +527,21 @@ func mustDecodePayload(t *testing.T, token string, out any) {
 		t.Fatal(err)
 	}
 	if err := json.Unmarshal(payload, out); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustDecodeHeader(t *testing.T, token string, out any) {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("token has %d parts, want 3", len(parts))
+	}
+	header, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(header, out); err != nil {
 		t.Fatal(err)
 	}
 }

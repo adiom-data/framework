@@ -18,6 +18,7 @@ type Identity struct {
 	Subject    string
 	Scopes     []string
 	Attributes map[string]string
+	Claims     map[string]any
 }
 
 // Authorizer maps a verified upstream identity to a final token identity.

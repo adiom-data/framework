@@ -59,7 +59,69 @@ type Claims struct {
 	Scope      string            `json:"scope,omitempty"`
 	Scopes     []string          `json:"scopes,omitempty"`
 	Attributes map[string]string `json:"attributes,omitempty"`
+	Custom     map[string]any    `json:"-"`
 	josejwt.Claims
+}
+
+// MarshalJSON merges registered, framework, and custom top-level claims.
+func (c Claims) MarshalJSON() ([]byte, error) {
+	if err := validateCustomClaims(c.Custom); err != nil {
+		return nil, err
+	}
+	type frameworkClaims struct {
+		Scope      string            `json:"scope,omitempty"`
+		Scopes     []string          `json:"scopes,omitempty"`
+		Attributes map[string]string `json:"attributes,omitempty"`
+		josejwt.Claims
+	}
+	registered, err := json.Marshal(frameworkClaims{
+		Scope:      c.Scope,
+		Scopes:     c.Scopes,
+		Attributes: c.Attributes,
+		Claims:     c.Claims,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{}
+	if err := json.Unmarshal(registered, &out); err != nil {
+		return nil, err
+	}
+	for key, value := range c.Custom {
+		out[key] = value
+	}
+	return json.Marshal(out)
+}
+
+// UnmarshalJSON stores custom top-level claims while decoding known claims.
+func (c *Claims) UnmarshalJSON(data []byte) error {
+	type frameworkClaims struct {
+		Scope      string            `json:"scope,omitempty"`
+		Scopes     []string          `json:"scopes,omitempty"`
+		Attributes map[string]string `json:"attributes,omitempty"`
+		josejwt.Claims
+	}
+	var known frameworkClaims
+	if err := json.Unmarshal(data, &known); err != nil {
+		return err
+	}
+	all := map[string]any{}
+	if err := json.Unmarshal(data, &all); err != nil {
+		return err
+	}
+	for key := range all {
+		if isReservedClaim(key) {
+			delete(all, key)
+		}
+	}
+	*c = Claims{
+		Scope:      known.Scope,
+		Scopes:     known.Scopes,
+		Attributes: known.Attributes,
+		Custom:     all,
+		Claims:     known.Claims,
+	}
+	return nil
 }
 
 // Metadata is minimal OpenID Connect discovery metadata for this issuer.
@@ -165,6 +227,7 @@ func (i *Issuer) Mint(ctx context.Context, identity auth.Identity) (string, time
 		Scope:      strings.Join(scopes, " "),
 		Scopes:     scopes,
 		Attributes: identity.Attributes,
+		Custom:     copyCustomClaims(identity.Claims),
 		Claims: josejwt.Claims{
 			Issuer:   i.issuer,
 			Subject:  identity.Subject,
@@ -174,6 +237,9 @@ func (i *Issuer) Mint(ctx context.Context, identity auth.Identity) (string, time
 	}
 	if i.audience != "" {
 		claims.Audience = josejwt.Audience{i.audience}
+	}
+	if err := validateCustomClaims(claims.Custom); err != nil {
+		return "", time.Time{}, err
 	}
 	opts := (&jose.SignerOptions{}).WithType("JWT")
 	opts.WithHeader("kid", i.activeKey.keyID)
@@ -348,4 +414,36 @@ func keysByID(keys []issuerKey) map[string]issuerKey {
 		byID[key.keyID] = key
 	}
 	return byID
+}
+
+func copyCustomClaims(claims map[string]any) map[string]any {
+	if len(claims) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(claims))
+	for key, value := range claims {
+		out[key] = value
+	}
+	return out
+}
+
+func validateCustomClaims(claims map[string]any) error {
+	for key := range claims {
+		if strings.TrimSpace(key) == "" {
+			return errors.New("tokenissuer: custom claim name is required")
+		}
+		if isReservedClaim(key) {
+			return fmt.Errorf("tokenissuer: custom claim %q is reserved", key)
+		}
+	}
+	return nil
+}
+
+func isReservedClaim(name string) bool {
+	switch name {
+	case "iss", "sub", "aud", "exp", "nbf", "iat", "jti", "scope", "scopes", "attributes":
+		return true
+	default:
+		return false
+	}
 }

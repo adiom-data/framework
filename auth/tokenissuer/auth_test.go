@@ -20,6 +20,7 @@ func TestBearerAuthenticatorStoresClaimsIdentityAndAuthValue(t *testing.T) {
 		Subject:    "user-1",
 		Scopes:     []string{"read"},
 		Attributes: map[string]string{"email": "dev@example.com"},
+		Claims:     map[string]any{"tenant_id": "tenant-1"},
 	})
 	type appUser struct {
 		ID    string
@@ -53,6 +54,9 @@ func TestBearerAuthenticatorStoresClaimsIdentityAndAuthValue(t *testing.T) {
 	}
 	if identity.Attributes["email"] != "dev@example.com" {
 		t.Fatalf("identity email=%q want dev@example.com", identity.Attributes["email"])
+	}
+	if identity.Claims["tenant_id"] != "tenant-1" {
+		t.Fatalf("identity tenant_id=%v want tenant-1", identity.Claims["tenant_id"])
 	}
 	user, ok := AuthValueFromContext[appUser](ctx)
 	if !ok {
@@ -114,6 +118,7 @@ func TestBearerAuthenticatorUsesRemoteJWKSVerifier(t *testing.T) {
 		Subject:    "user-1",
 		Scopes:     []string{"read"},
 		Attributes: map[string]string{"email": "dev@example.com"},
+		Claims:     map[string]any{"tenant_id": "tenant-1"},
 	})
 	verifier, err := NewRemoteVerifier(context.Background(), RemoteVerifierConfig{
 		Issuer:           server.URL,
@@ -137,6 +142,9 @@ func TestBearerAuthenticatorUsesRemoteJWKSVerifier(t *testing.T) {
 	}
 	if claims.Attributes["email"] != "dev@example.com" {
 		t.Fatalf("email=%q want dev@example.com", claims.Attributes["email"])
+	}
+	if claims.Custom["tenant_id"] != "tenant-1" {
+		t.Fatalf("tenant_id=%v want tenant-1", claims.Custom["tenant_id"])
 	}
 }
 

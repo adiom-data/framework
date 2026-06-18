@@ -3,9 +3,11 @@ package tokenissuer
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +41,10 @@ func TestIssuerMintsAndVerifiesToken(t *testing.T) {
 		Subject:    "user-1",
 		Scopes:     []string{"write", "read", "read"},
 		Attributes: map[string]string{"tenant": "t1"},
+		Claims: map[string]any{
+			"email":      "user@example.com",
+			"tenant_ids": []string{"t1", "t2"},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -59,6 +65,48 @@ func TestIssuerMintsAndVerifiesToken(t *testing.T) {
 	}
 	if claims.Attributes["tenant"] != "t1" {
 		t.Fatalf("tenant=%q want t1", claims.Attributes["tenant"])
+	}
+	if claims.Custom["email"] != "user@example.com" {
+		t.Fatalf("email=%v want user@example.com", claims.Custom["email"])
+	}
+	tenantIDs, ok := claims.Custom["tenant_ids"].([]any)
+	if !ok || len(tenantIDs) != 2 || tenantIDs[0] != "t1" || tenantIDs[1] != "t2" {
+		t.Fatalf("tenant_ids=%#v", claims.Custom["tenant_ids"])
+	}
+	var payload map[string]any
+	mustDecodePayload(t, token, &payload)
+	if payload["email"] != "user@example.com" {
+		t.Fatalf("payload email=%v want user@example.com", payload["email"])
+	}
+	if _, ok := payload["custom"]; ok {
+		t.Fatal("payload included internal custom claim field")
+	}
+}
+
+func TestIssuerRejectsReservedCustomClaims(t *testing.T) {
+	t.Parallel()
+
+	privateKey, err := GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer, err := New(Config{
+		Issuer:      "https://auth.example.com/",
+		Audience:    "service",
+		ActiveKeyID: "test-key",
+		Keys:        []SigningKey{{KeyID: "test-key", PrivateKey: privateKey}},
+		TTL:         time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = issuer.Mint(context.Background(), auth.Identity{
+		Subject: "user-1",
+		Claims:  map[string]any{"sub": "other-user"},
+	})
+	if err == nil {
+		t.Fatal("expected reserved custom claim to be rejected")
 	}
 }
 
@@ -321,5 +369,20 @@ func TestIssuerRequiresKeyID(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected key id error")
+	}
+}
+
+func mustDecodePayload(t *testing.T, token string, out any) {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("token has %d parts, want 3", len(parts))
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(payload, out); err != nil {
+		t.Fatal(err)
 	}
 }

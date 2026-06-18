@@ -189,6 +189,7 @@ func IdentityFromClaims(claims *Claims) auth.Identity {
 		Subject:    claims.Subject,
 		Scopes:     claimScopes(claims),
 		Attributes: copyStringMap(claims.Attributes),
+		Claims:     copyAnyMap(claims.Custom),
 	}
 }
 
@@ -230,6 +231,19 @@ func copyStringMap(values map[string]string) map[string]string {
 		return nil
 	}
 	copy := make(map[string]string, len(values))
+	for key, value := range values {
+		if strings.TrimSpace(key) != "" {
+			copy[key] = value
+		}
+	}
+	return copy
+}
+
+func copyAnyMap(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+	copy := make(map[string]any, len(values))
 	for key, value := range values {
 		if strings.TrimSpace(key) != "" {
 			copy[key] = value

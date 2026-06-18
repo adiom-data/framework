@@ -80,7 +80,10 @@ mux.Handle("/.well-known/jwks.json", issuer.JWKSHandler())
 
 The JWT itself is standard: `iss`, `sub`, `iat`, `exp`, optional `aud`, a `kid`
 header, and an EdDSA signature. The default token also includes `scope`,
-`scopes`, and `attributes` claims from `auth.Identity`.
+`scopes`, and `attributes` claims from `auth.Identity`. Apps can also set
+`auth.Identity.Claims` to mint custom top-level claims. Custom claims cannot use
+registered or framework-reserved names such as `iss`, `sub`, `aud`, `exp`,
+`scope`, `scopes`, or `attributes`.
 
 For key rotation, configure multiple signing keys and choose the active key:
 

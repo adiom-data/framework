@@ -104,8 +104,12 @@ Backend services can verify application bearer tokens with a protocol-neutral
 authenticator and a thin Connect interceptor:
 
 ```go
-authenticator := tokenissuer.NewBearerAuthenticator(
-	issuer,
+verifier := tokenissuer.NewLazyRemoteVerifier(tokenissuer.RemoteVerifierConfig{
+	Issuer:           "https://app.example.com/auth",
+	AllowedAudiences: []string{"sample-service"},
+})
+authenticator := tokenissuer.NewBearerAuthenticatorFromVerifier(
+	verifier,
 	tokenissuer.RequireScopes("sample:read"),
 	tokenissuer.WithAuthValue(func(_ context.Context, claims *tokenissuer.Claims) (*samplev1.User, error) {
 		return &samplev1.User{
@@ -119,6 +123,22 @@ authenticator := tokenissuer.NewBearerAuthenticator(
 
 service := runtime.NewService(
 	httpapp.WithServiceInterceptors(tokenissuer.ConnectAuth(authenticator)),
+)
+```
+
+`NewLazyRemoteVerifier` starts without network I/O and initializes discovery/JWKS
+on the first verification attempt. Requests fail closed until the issuer is
+available. Use `NewRemoteVerifier(ctx, cfg)` when startup should block and fail
+if issuer discovery is unavailable.
+
+Both remote verifier paths cache keys through the OIDC remote key set.
+`NewBearerAuthenticator(issuer, ...)` still verifies locally with an in-process
+`tokenissuer.Issuer`, which is convenient for tests or same-process apps:
+
+```go
+authenticator := tokenissuer.NewBearerAuthenticator(
+	issuer,
+	tokenissuer.RequireScopes("sample:read"),
 )
 ```
 

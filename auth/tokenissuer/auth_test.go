@@ -3,6 +3,8 @@ package tokenissuer
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -104,6 +106,159 @@ func TestBearerAuthenticatorRequiresScopes(t *testing.T) {
 	}
 }
 
+func TestBearerAuthenticatorUsesRemoteJWKSVerifier(t *testing.T) {
+	t.Parallel()
+
+	issuer, server := testRemoteTokenIssuer(t, "service")
+	token := mintTestToken(t, issuer, auth.Identity{
+		Subject:    "user-1",
+		Scopes:     []string{"read"},
+		Attributes: map[string]string{"email": "dev@example.com"},
+	})
+	verifier, err := NewRemoteVerifier(context.Background(), RemoteVerifierConfig{
+		Issuer:           server.URL,
+		AllowedAudiences: []string{"service"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator := NewBearerAuthenticatorFromVerifier(verifier, RequireScopes("read"))
+
+	ctx, err := authenticator.Authenticate(context.Background(), "Bearer "+token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, ok := ClaimsFromContext(ctx)
+	if !ok {
+		t.Fatal("claims missing from context")
+	}
+	if claims.Subject != "user-1" {
+		t.Fatalf("subject=%q want user-1", claims.Subject)
+	}
+	if claims.Attributes["email"] != "dev@example.com" {
+		t.Fatalf("email=%q want dev@example.com", claims.Attributes["email"])
+	}
+}
+
+func TestRemoteVerifierRejectsInvalidAudience(t *testing.T) {
+	t.Parallel()
+
+	issuer, server := testRemoteTokenIssuer(t, "service")
+	token := mintTestToken(t, issuer, auth.Identity{Subject: "user-1", Scopes: []string{"read"}})
+	verifier, err := NewRemoteVerifier(context.Background(), RemoteVerifierConfig{
+		Issuer:           server.URL,
+		AllowedAudiences: []string{"other-service"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := verifier.Verify(context.Background(), token); err == nil {
+		t.Fatal("expected invalid audience")
+	}
+}
+
+func TestRemoteVerifierSkipsAudienceWhenUnconfigured(t *testing.T) {
+	t.Parallel()
+
+	issuer, server := testRemoteTokenIssuer(t, "service")
+	token := mintTestToken(t, issuer, auth.Identity{Subject: "user-1", Scopes: []string{"read"}})
+	verifier, err := NewRemoteVerifier(context.Background(), RemoteVerifierConfig{
+		Issuer: server.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := verifier.Verify(context.Background(), token); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLazyRemoteVerifierDoesNotDiscoverAtConstruction(t *testing.T) {
+	t.Parallel()
+
+	verifier := NewLazyRemoteVerifier(RemoteVerifierConfig{
+		Issuer: "http://127.0.0.1:1",
+	})
+	if verifier == nil {
+		t.Fatal("verifier is nil")
+	}
+}
+
+func TestLazyRemoteVerifierFailsClosedUntilIssuerAvailable(t *testing.T) {
+	t.Parallel()
+
+	var issuer *Issuer
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	ready := false
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		if !ready {
+			http.NotFound(w, r)
+			return
+		}
+		issuer.MetadataHandler().ServeHTTP(w, r)
+	})
+	mux.HandleFunc("/.well-known/jwks.json", func(w http.ResponseWriter, r *http.Request) {
+		if !ready {
+			http.NotFound(w, r)
+			return
+		}
+		issuer.JWKSHandler().ServeHTTP(w, r)
+	})
+	privateKey, err := GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer, err = New(Config{
+		Issuer:      server.URL,
+		Audience:    "service",
+		ActiveKeyID: "test-key",
+		Keys:        []SigningKey{{KeyID: "test-key", PrivateKey: privateKey}},
+		TTL:         time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := mintTestToken(t, issuer, auth.Identity{Subject: "user-1"})
+	verifier := NewLazyRemoteVerifier(RemoteVerifierConfig{
+		Issuer:           server.URL,
+		AllowedAudiences: []string{"service"},
+	})
+
+	if _, err := verifier.Verify(context.Background(), token); err == nil {
+		t.Fatal("expected verification to fail while issuer metadata is unavailable")
+	}
+	ready = true
+	claims, err := verifier.Verify(context.Background(), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Subject != "user-1" {
+		t.Fatalf("subject=%q want user-1", claims.Subject)
+	}
+}
+
+func TestLazyRemoteVerifierCachesSuccessfulInitialization(t *testing.T) {
+	t.Parallel()
+
+	issuer, server := testRemoteTokenIssuer(t, "service")
+	token := mintTestToken(t, issuer, auth.Identity{Subject: "user-1"})
+	verifier := NewLazyRemoteVerifier(RemoteVerifierConfig{
+		Issuer:           server.URL,
+		AllowedAudiences: []string{"service"},
+	})
+	if _, err := verifier.Verify(context.Background(), token); err != nil {
+		t.Fatal(err)
+	}
+	server.Close()
+	if _, err := verifier.Verify(context.Background(), token); err != nil {
+		t.Fatalf("verifier did not reuse initialized key set: %v", err)
+	}
+}
+
 func TestConnectAuthMapsErrorsAndStoresContext(t *testing.T) {
 	t.Parallel()
 
@@ -180,6 +335,30 @@ func testTokenIssuer(t *testing.T) *Issuer {
 		t.Fatal(err)
 	}
 	return issuer
+}
+
+func testRemoteTokenIssuer(t *testing.T, audience string) (*Issuer, *httptest.Server) {
+	t.Helper()
+	privateKey, err := GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	issuer, err := New(Config{
+		Issuer:      server.URL,
+		Audience:    audience,
+		ActiveKeyID: "test-key",
+		Keys:        []SigningKey{{KeyID: "test-key", PrivateKey: privateKey}},
+		TTL:         time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux.Handle("/.well-known/openid-configuration", issuer.MetadataHandler())
+	mux.Handle("/.well-known/jwks.json", issuer.JWKSHandler())
+	return issuer, server
 }
 
 func mintTestToken(t *testing.T, issuer *Issuer, identity auth.Identity) string {

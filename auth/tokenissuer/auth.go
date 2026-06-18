@@ -32,22 +32,32 @@ type bearerAuthConfig struct {
 	mapAuthValue func(context.Context, *Claims) (any, error)
 }
 
+// TokenVerifier verifies a bearer token and returns tokenissuer claims.
+type TokenVerifier interface {
+	Verify(context.Context, string) (*Claims, error)
+}
+
 // BearerAuthenticator verifies Authorization bearer tokens, applies generic
 // auth policy, and stores verified auth data on context.
 type BearerAuthenticator struct {
-	issuer *Issuer
-	cfg    bearerAuthConfig
+	verifier TokenVerifier
+	cfg      bearerAuthConfig
 }
 
 // NewBearerAuthenticator returns a protocol-neutral bearer-token authenticator.
 func NewBearerAuthenticator(issuer *Issuer, opts ...BearerAuthOption) BearerAuthenticator {
+	return NewBearerAuthenticatorFromVerifier(localTokenVerifier{issuer: issuer}, opts...)
+}
+
+// NewBearerAuthenticatorFromVerifier returns a bearer-token authenticator using verifier.
+func NewBearerAuthenticatorFromVerifier(verifier TokenVerifier, opts ...BearerAuthOption) BearerAuthenticator {
 	cfg := bearerAuthConfig{}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&cfg)
 		}
 	}
-	return BearerAuthenticator{issuer: issuer, cfg: cfg}
+	return BearerAuthenticator{verifier: verifier, cfg: cfg}
 }
 
 // AllowMissingBearerToken lets requests without an Authorization bearer token
@@ -113,7 +123,10 @@ func (a BearerAuthenticator) Authenticate(ctx context.Context, authorization str
 		}
 		return ctx, ErrMissingBearerToken
 	}
-	claims, err := a.issuer.Verify(token)
+	if a.verifier == nil {
+		return ctx, fmt.Errorf("%w: verifier is not configured", ErrInvalidBearerToken)
+	}
+	claims, err := a.verifier.Verify(ctx, token)
 	if err != nil {
 		return ctx, fmt.Errorf("%w: %v", ErrInvalidBearerToken, err)
 	}
@@ -141,6 +154,14 @@ func BearerToken(header string) string {
 		return ""
 	}
 	return strings.TrimSpace(token)
+}
+
+type localTokenVerifier struct {
+	issuer *Issuer
+}
+
+func (v localTokenVerifier) Verify(_ context.Context, token string) (*Claims, error) {
+	return v.issuer.Verify(token)
 }
 
 type claimsContextKey struct{}

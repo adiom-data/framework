@@ -46,7 +46,7 @@ return httpserver.Server{
 - listens on `Addr`, or `:8080` when `Addr` is empty
 - serves `Handler`
 - enables HTTP/1 and unencrypted HTTP/2 by default
-- enables HTTP/1 and TLS HTTP/2 when `TLSConfig` is set
+- enables HTTP/1 and TLS HTTP/2 when TLS is configured
 - shuts down gracefully when the context is canceled
 - treats `http.ErrServerClosed` as a clean stop
 
@@ -58,6 +58,25 @@ Defaults:
 - `ShutdownTimeout`: `10s`
 
 Use `SignalContext` when a process should stop on `SIGINT` or `SIGTERM`.
+
+TLS is optional. Most in-cluster services should terminate TLS at the gateway
+or service mesh. For services that need to serve TLS directly, configure either
+certificate files or a custom TLS config:
+
+```go
+return httpserver.Server{
+	Handler:     mux,
+	TLSCertFile: "/var/run/tls/tls.crt",
+	TLSKeyFile:  "/var/run/tls/tls.key",
+}.Run(ctx)
+```
+
+```go
+return httpserver.Server{
+	Handler:   mux,
+	TLSConfig: tlsConfig,
+}.Run(ctx)
+```
 
 ## Health
 

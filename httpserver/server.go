@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -43,6 +44,8 @@ type Server struct {
 	ShutdownTimeout   time.Duration
 	Protocols         Protocols
 	TLSConfig         *tls.Config
+	TLSCertFile       string
+	TLSKeyFile        string
 	Logger            *slog.Logger
 	OnShutdown        func()
 }
@@ -61,6 +64,10 @@ func (s Server) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	tlsCertFile, tlsKeyFile, err := s.tlsCertFiles()
+	if err != nil {
+		return err
+	}
 
 	listener, err := net.Listen("tcp", srv.Addr)
 	if err != nil {
@@ -72,7 +79,7 @@ func (s Server) Run(ctx context.Context) error {
 	go func() {
 		s.log().Info("http server listening", "addr", listener.Addr().String())
 		if s.usesTLS() {
-			errc <- srv.ServeTLS(listener, "", "")
+			errc <- srv.ServeTLS(listener, tlsCertFile, tlsKeyFile)
 			return
 		}
 		errc <- srv.Serve(listener)
@@ -132,7 +139,7 @@ func (s Server) httpProtocols() *http.Protocols {
 		protocols.SetHTTP1(true)
 		protocols.SetHTTP2(true)
 	case ProtocolsInternalCleartext:
-		if s.TLSConfig != nil {
+		if s.usesTLS() {
 			protocols.SetHTTP1(true)
 			protocols.SetHTTP2(true)
 			return protocols
@@ -147,7 +154,19 @@ func (s Server) httpProtocols() *http.Protocols {
 }
 
 func (s Server) usesTLS() bool {
-	return s.Protocols == ProtocolsTLS || s.TLSConfig != nil
+	return s.Protocols == ProtocolsTLS || s.TLSConfig != nil || strings.TrimSpace(s.TLSCertFile) != "" || strings.TrimSpace(s.TLSKeyFile) != ""
+}
+
+func (s Server) tlsCertFiles() (string, string, error) {
+	certFile := strings.TrimSpace(s.TLSCertFile)
+	keyFile := strings.TrimSpace(s.TLSKeyFile)
+	if certFile == "" && keyFile == "" {
+		return "", "", nil
+	}
+	if certFile == "" || keyFile == "" {
+		return "", "", errors.New("httpserver: TLS cert file and key file must be configured together")
+	}
+	return certFile, keyFile, nil
 }
 
 func (s Server) readHeaderTimeout() time.Duration {

@@ -1,6 +1,7 @@
 package httpapp
 
 import (
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -67,6 +68,32 @@ func TestServiceTelemetryOption(t *testing.T) {
 	}
 }
 
+func TestServiceTLSFilesOption(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(WithServiceTLSFiles("/certs/tls.crt", "/certs/tls.key"))
+	app := service.app()
+
+	if app.TLSCertFile != "/certs/tls.crt" {
+		t.Fatalf("TLSCertFile=%q want /certs/tls.crt", app.TLSCertFile)
+	}
+	if app.TLSKeyFile != "/certs/tls.key" {
+		t.Fatalf("TLSKeyFile=%q want /certs/tls.key", app.TLSKeyFile)
+	}
+}
+
+func TestServiceTLSConfigOption(t *testing.T) {
+	t.Parallel()
+
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	service := NewService(WithServiceTLSConfig(tlsConfig))
+	app := service.app()
+
+	if app.TLSConfig != tlsConfig {
+		t.Fatal("TLSConfig was not propagated")
+	}
+}
+
 func TestAppAddrUsesExplicitAddr(t *testing.T) {
 	t.Setenv("PORT", "9090")
 	app := App{Addr: ":7070"}
@@ -89,5 +116,34 @@ func TestAppAddrUsesDefault(t *testing.T) {
 
 	if got := (App{}).addr(); got != DefaultAddr {
 		t.Fatalf("addr=%q want %q", got, DefaultAddr)
+	}
+}
+
+func TestAppTLSFilesUseExplicitValues(t *testing.T) {
+	t.Setenv("TLS_CERT_FILE", "/env/tls.crt")
+	t.Setenv("TLS_KEY_FILE", "/env/tls.key")
+	app := App{
+		TLSCertFile: "/explicit/tls.crt",
+		TLSKeyFile:  "/explicit/tls.key",
+	}
+
+	if got := app.tlsCertFile(); got != "/explicit/tls.crt" {
+		t.Fatalf("TLS cert file=%q want explicit value", got)
+	}
+	if got := app.tlsKeyFile(); got != "/explicit/tls.key" {
+		t.Fatalf("TLS key file=%q want explicit value", got)
+	}
+}
+
+func TestAppTLSFilesUseEnv(t *testing.T) {
+	t.Setenv("TLS_CERT_FILE", "/env/tls.crt")
+	t.Setenv("TLS_KEY_FILE", "/env/tls.key")
+	app := App{}
+
+	if got := app.tlsCertFile(); got != "/env/tls.crt" {
+		t.Fatalf("TLS cert file=%q want env value", got)
+	}
+	if got := app.tlsKeyFile(); got != "/env/tls.key" {
+		t.Fatalf("TLS key file=%q want env value", got)
 	}
 }

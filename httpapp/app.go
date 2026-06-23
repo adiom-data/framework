@@ -2,6 +2,7 @@ package httpapp
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"net/http"
 	"os"
@@ -47,6 +48,9 @@ type App struct {
 	ReadHeaderTimeout time.Duration
 	IdleTimeout       time.Duration
 	ShutdownTimeout   time.Duration
+	TLSConfig         *tls.Config
+	TLSCertFile       string
+	TLSKeyFile        string
 }
 
 // Route is a regular HTTP route.
@@ -210,6 +214,9 @@ func (a App) Run(ctx context.Context) error {
 		ReadHeaderTimeout: a.ReadHeaderTimeout,
 		IdleTimeout:       a.IdleTimeout,
 		ShutdownTimeout:   a.ShutdownTimeout,
+		TLSConfig:         a.TLSConfig,
+		TLSCertFile:       a.tlsCertFile(),
+		TLSKeyFile:        a.tlsKeyFile(),
 	}.Run(ctx)
 }
 
@@ -221,6 +228,20 @@ func (a App) addr() string {
 		return ":" + port
 	}
 	return DefaultAddr
+}
+
+func (a App) tlsCertFile() string {
+	if strings.TrimSpace(a.TLSCertFile) != "" {
+		return strings.TrimSpace(a.TLSCertFile)
+	}
+	return strings.TrimSpace(os.Getenv("TLS_CERT_FILE"))
+}
+
+func (a App) tlsKeyFile() string {
+	if strings.TrimSpace(a.TLSKeyFile) != "" {
+		return strings.TrimSpace(a.TLSKeyFile)
+	}
+	return strings.TrimSpace(os.Getenv("TLS_KEY_FILE"))
 }
 
 func (a App) connectOptions(service ConnectService, telemetryInterceptor connect.Interceptor) []connect.HandlerOption {

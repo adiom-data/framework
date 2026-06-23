@@ -73,6 +73,27 @@ func TestHTTPServerTLSConfigSelectsTLSProtocols(t *testing.T) {
 	}
 }
 
+func TestHTTPServerTLSFilesSelectTLSProtocols(t *testing.T) {
+	got, err := (Server{
+		Handler:     http.NewServeMux(),
+		TLSCertFile: "/certs/tls.crt",
+		TLSKeyFile:  "/certs/tls.key",
+	}).httpServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Protocols == nil || !got.Protocols.HTTP1() || !got.Protocols.HTTP2() || got.Protocols.UnencryptedHTTP2() {
+		t.Fatalf("protocols=%v want HTTP/1 and TLS HTTP/2", got.Protocols)
+	}
+}
+
+func TestHTTPServerRejectsPartialTLSFiles(t *testing.T) {
+	_, _, err := (Server{TLSCertFile: "/certs/tls.crt"}).tlsCertFiles()
+	if err == nil {
+		t.Fatal("expected partial TLS file config error")
+	}
+}
+
 func TestRunReturnsAfterContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

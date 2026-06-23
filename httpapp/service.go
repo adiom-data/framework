@@ -2,6 +2,7 @@ package httpapp
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"net/http"
 	"time"
@@ -29,6 +30,9 @@ type Service struct {
 	ReadHeaderTimeout time.Duration
 	IdleTimeout       time.Duration
 	ShutdownTimeout   time.Duration
+	TLSConfig         *tls.Config
+	TLSCertFile       string
+	TLSKeyFile        string
 }
 
 // NewService builds an internal Connect service with framework defaults.
@@ -132,6 +136,21 @@ func WithServiceIdleTimeout(timeout time.Duration) ServiceOption {
 	}
 }
 
+// WithServiceTLSConfig enables TLS with an application-provided TLS config.
+func WithServiceTLSConfig(cfg *tls.Config) ServiceOption {
+	return func(service *Service) {
+		service.TLSConfig = cfg
+	}
+}
+
+// WithServiceTLSFiles enables TLS with certificate and private key files.
+func WithServiceTLSFiles(certFile, keyFile string) ServiceOption {
+	return func(service *Service) {
+		service.TLSCertFile = certFile
+		service.TLSKeyFile = keyFile
+	}
+}
+
 // Handler assembles the service handler.
 func (s Service) Handler() http.Handler {
 	return s.app().Handler()
@@ -158,5 +177,8 @@ func (s Service) app() App {
 		ReadHeaderTimeout: s.ReadHeaderTimeout,
 		IdleTimeout:       s.IdleTimeout,
 		ShutdownTimeout:   s.ShutdownTimeout,
+		TLSConfig:         s.TLSConfig,
+		TLSCertFile:       s.TLSCertFile,
+		TLSKeyFile:        s.TLSKeyFile,
 	}
 }

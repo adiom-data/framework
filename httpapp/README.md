@@ -93,7 +93,7 @@ the service shares the runtime telemetry configuration.
 
 `Service` and `App` automatically:
 
-- enable HTTP/1 and unencrypted HTTP/2
+- enable HTTP/1 and unencrypted HTTP/2 by default
 - install standard gRPC health
 - register `liveness` and `readiness` health labels for Kubernetes probes
 - recover panics and log requests
@@ -104,6 +104,26 @@ Reflection is explicit and disabled by default.
 
 If `Addr` is empty, the app listens on `:$PORT` when `PORT` is set, otherwise
 `:8080`.
+
+TLS is opt-in. In the usual Kubernetes path, terminate TLS at the gateway or
+service mesh and keep service pods cleartext. If a service should serve TLS
+directly, configure certificate files explicitly:
+
+```go
+httpapp.NewService(
+	httpapp.WithServiceTLSFiles("/var/run/tls/tls.crt", "/var/run/tls/tls.key"),
+)
+```
+
+or mount cert/key files and set:
+
+```text
+TLS_CERT_FILE=/var/run/tls/tls.crt
+TLS_KEY_FILE=/var/run/tls/tls.key
+```
+
+Both files must be configured together. Advanced services can pass a custom
+`*tls.Config` with `httpapp.WithServiceTLSConfig(...)`.
 
 ## Telemetry
 

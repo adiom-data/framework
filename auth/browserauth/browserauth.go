@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -57,6 +58,7 @@ type BrowserAuth struct {
 	provider        *oidc.Provider
 	oauth2          oauth2.Config
 	redirectURL     RedirectURLResolver
+	endSessionURL   string
 	stateStore      StateStore
 	authCodeOptions []oauth2.AuthCodeOption
 }
@@ -229,6 +231,12 @@ func New(ctx context.Context, cfg Config) (*BrowserAuth, error) {
 	if err != nil {
 		return nil, err
 	}
+	var metadata struct {
+		EndSessionURL string `json:"end_session_endpoint"`
+	}
+	if err := provider.Claims(&metadata); err != nil {
+		return nil, err
+	}
 	scopes := append([]string{oidc.ScopeOpenID}, cfg.Scopes...)
 	if len(cfg.Scopes) == 0 {
 		scopes = []string{oidc.ScopeOpenID, "profile", "email"}
@@ -247,6 +255,7 @@ func New(ctx context.Context, cfg Config) (*BrowserAuth, error) {
 			RedirectURL:  redirectURL,
 			Scopes:       scopes,
 		},
+		endSessionURL:   strings.TrimSpace(metadata.EndSessionURL),
 		redirectURL:     cfg.RedirectURLResolver,
 		stateStore:      stateStore,
 		authCodeOptions: append([]oauth2.AuthCodeOption(nil), cfg.AuthCodeOptions...),
@@ -390,15 +399,25 @@ func RedirectInvalidState(location string) InvalidStateHandler {
 // PublicRedirectURL resolves callbackPath against the request's public base URL.
 func PublicRedirectURL(callbackPath string) RedirectURLResolver {
 	return func(r *http.Request) (string, error) {
-		callbackPath := strings.TrimSpace(callbackPath)
-		if callbackPath == "" || !strings.HasPrefix(callbackPath, "/") {
-			return "", errors.New("browserauth: callback path must start with /")
+		return publicURL(r, callbackPath, "callback path")
+	}
+}
+
+// EndSessionLogoutRedirect redirects logout through the provider end-session endpoint.
+func (b *BrowserAuth) EndSessionLogoutRedirect(postLogoutRedirectURI string) LogoutRedirectFunc {
+	return func(*http.Request) (string, error) {
+		return b.endSessionRedirect(strings.TrimSpace(postLogoutRedirectURI))
+	}
+}
+
+// PublicEndSessionLogoutRedirect resolves postLogoutPath against the request's public base URL.
+func (b *BrowserAuth) PublicEndSessionLogoutRedirect(postLogoutPath string) LogoutRedirectFunc {
+	return func(r *http.Request) (string, error) {
+		postLogoutRedirectURI, err := publicURL(r, postLogoutPath, "post logout path")
+		if err != nil {
+			return "", err
 		}
-		baseURL := httputil.PublicBaseURL(r)
-		if baseURL == "" {
-			return "", errors.New("browserauth: public base URL is required")
-		}
-		return validateRedirectURL(strings.TrimRight(baseURL, "/") + callbackPath)
+		return b.endSessionRedirect(postLogoutRedirectURI)
 	}
 }
 
@@ -445,6 +464,45 @@ func validateRedirectURL(value string) (string, error) {
 		return "", errors.New("browserauth: redirect URL must not include a fragment")
 	}
 	return value, nil
+}
+
+func publicURL(r *http.Request, path string, label string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" || !strings.HasPrefix(path, "/") {
+		return "", fmt.Errorf("browserauth: %s must start with /", label)
+	}
+	baseURL := httputil.PublicBaseURL(r)
+	if baseURL == "" {
+		return "", errors.New("browserauth: public base URL is required")
+	}
+	return validateRedirectURL(strings.TrimRight(baseURL, "/") + path)
+}
+
+func (b *BrowserAuth) endSessionRedirect(postLogoutRedirectURI string) (string, error) {
+	endSessionURL := strings.TrimSpace(b.endSessionURL)
+	if endSessionURL == "" {
+		return postLogoutRedirectURI, nil
+	}
+	parsed, err := url.Parse(endSessionURL)
+	if err != nil {
+		return "", err
+	}
+	if !parsed.IsAbs() || parsed.Host == "" {
+		return "", errors.New("browserauth: end session endpoint must be absolute")
+	}
+	query := parsed.Query()
+	if strings.TrimSpace(b.oauth2.ClientID) != "" {
+		query.Set("client_id", b.oauth2.ClientID)
+	}
+	if postLogoutRedirectURI != "" {
+		postLogoutRedirectURI, err = validateRedirectURL(postLogoutRedirectURI)
+		if err != nil {
+			return "", err
+		}
+		query.Set("post_logout_redirect_uri", postLogoutRedirectURI)
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
 }
 
 func (b *BrowserAuth) verifyIDToken(ctx context.Context, rawIDToken string) (map[string]any, error) {

@@ -72,3 +72,11 @@ const transport = createConnectTransport({
 The default `credentials` mode is `same-origin`, matching the recommended
 same-host `/auth` mount. For cross-origin auth hosts, pass `credentials:
 "include"` and configure CORS at the gateway or HTTP layer.
+
+For local-only logout, call `await tokenManager.logout()`. If `/auth/logout`
+redirects through the upstream OIDC provider, use a top-level browser
+navigation instead:
+
+```ts
+tokenManager.logoutWithRedirect();
+```

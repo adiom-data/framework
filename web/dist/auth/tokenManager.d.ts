@@ -9,6 +9,9 @@ export type AuthTokenManagerOptions = {
 export type TokenOptions = {
     forceRefresh?: boolean;
 };
+export type LogoutRedirectOptions = {
+    location?: Pick<Location, "assign">;
+};
 export declare class AuthTokenManager {
     private readonly tokenUrl;
     private readonly logoutUrl;
@@ -21,6 +24,7 @@ export declare class AuthTokenManager {
     getToken(options?: TokenOptions): Promise<string | undefined>;
     clear(): void;
     logout(): Promise<void>;
+    logoutWithRedirect(options?: LogoutRedirectOptions): void;
     private fetchToken;
     private isExpiring;
 }

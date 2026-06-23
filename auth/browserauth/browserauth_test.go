@@ -432,6 +432,77 @@ func TestPublicRedirectURLUsesRequestPublicBaseURL(t *testing.T) {
 	}
 }
 
+func TestEndSessionLogoutRedirectUsesProviderEndpoint(t *testing.T) {
+	t.Parallel()
+
+	auth := &BrowserAuth{
+		oauth2:        oauth2.Config{ClientID: "app-client"},
+		endSessionURL: "https://keycloak.example.com/realms/app/protocol/openid-connect/logout?existing=1",
+	}
+
+	got, err := auth.EndSessionLogoutRedirect("https://app.example.com/")(httptest.NewRequest(http.MethodGet, "/logout", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redirect, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := redirect.Scheme + "://" + redirect.Host + redirect.Path; got != "https://keycloak.example.com/realms/app/protocol/openid-connect/logout" {
+		t.Fatalf("redirect endpoint=%q", got)
+	}
+	query := redirect.Query()
+	if got := query.Get("existing"); got != "1" {
+		t.Fatalf("existing=%q want 1", got)
+	}
+	if got := query.Get("client_id"); got != "app-client" {
+		t.Fatalf("client_id=%q want app-client", got)
+	}
+	if got := query.Get("post_logout_redirect_uri"); got != "https://app.example.com/" {
+		t.Fatalf("post_logout_redirect_uri=%q want https://app.example.com/", got)
+	}
+}
+
+func TestEndSessionLogoutRedirectFallsBackWithoutProviderEndpoint(t *testing.T) {
+	t.Parallel()
+
+	auth := &BrowserAuth{}
+	got, err := auth.EndSessionLogoutRedirect("https://app.example.com/")(httptest.NewRequest(http.MethodGet, "/logout", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://app.example.com/" {
+		t.Fatalf("redirect=%q want post logout redirect", got)
+	}
+}
+
+func TestPublicEndSessionLogoutRedirectUsesRequestPublicBaseURL(t *testing.T) {
+	t.Parallel()
+
+	auth := &BrowserAuth{
+		oauth2:        oauth2.Config{ClientID: "app-client"},
+		endSessionURL: "https://keycloak.example.com/realms/app/protocol/openid-connect/logout",
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://internal.local/auth/logout", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "tenant.example.com")
+
+	got, err := auth.PublicEndSessionLogoutRedirect("/")(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redirect, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := redirect.Query().Get("post_logout_redirect_uri"); got != "https://tenant.example.com/" {
+		t.Fatalf("post_logout_redirect_uri=%q want https://tenant.example.com/", got)
+	}
+	if got := redirect.Query().Get("client_id"); got != "app-client" {
+		t.Fatalf("client_id=%q want app-client", got)
+	}
+}
+
 func TestLoginHandlerUsesRedirectURLResolver(t *testing.T) {
 	t.Parallel()
 

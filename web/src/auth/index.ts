@@ -1,2 +1,7 @@
 export { createAuthInterceptor } from "./connect.js";
-export { AuthTokenManager, type AuthTokenManagerOptions, type TokenOptions } from "./tokenManager.js";
+export {
+  AuthTokenManager,
+  type AuthTokenManagerOptions,
+  type LogoutRedirectOptions,
+  type TokenOptions,
+} from "./tokenManager.js";

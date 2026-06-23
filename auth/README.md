@@ -207,6 +207,23 @@ handler := browserAuth.Handler(browserauth.HandlerConfig{
 mux.Handle("/auth/", http.StripPrefix("/auth", handler))
 ```
 
+`/auth/logout` always revokes the local browser session and clears the local
+session cookie. If the user should also be signed out of the upstream OIDC
+provider, configure a provider logout redirect. For request-hosted apps, this
+uses the provider `end_session_endpoint` when it is advertised and sends the
+browser back to the public app URL afterward:
+
+```go
+handler := browserAuth.Handler(browserauth.HandlerConfig{
+	// ...
+	LogoutRedirectFunc: browserAuth.PublicEndSessionLogoutRedirect("/"),
+})
+```
+
+For fixed public URLs, use `browserAuth.EndSessionLogoutRedirect("https://app.example.com/")`.
+Providers such as Keycloak must be configured to allow the resulting
+`post_logout_redirect_uri`.
+
 Set `browserauth.Config.RedirectURL` when the public callback URL is fixed and
 known at startup:
 

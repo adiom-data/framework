@@ -39,6 +39,11 @@ export class AuthTokenManager {
             method: "POST",
         });
     }
+    logoutWithRedirect(options = {}) {
+        this.clear();
+        const location = options.location ?? globalThis.location;
+        location.assign(this.logoutUrl);
+    }
     async fetchToken() {
         const response = await this.fetch(this.tokenUrl, {
             credentials: this.credentials,

@@ -22,6 +22,10 @@ export type TokenOptions = {
   forceRefresh?: boolean;
 };
 
+export type LogoutRedirectOptions = {
+  location?: Pick<Location, "assign">;
+};
+
 export class AuthTokenManager {
   private readonly tokenUrl: string;
   private readonly logoutUrl: string;
@@ -65,6 +69,12 @@ export class AuthTokenManager {
       credentials: this.credentials,
       method: "POST",
     });
+  }
+
+  logoutWithRedirect(options: LogoutRedirectOptions = {}) {
+    this.clear();
+    const location = options.location ?? globalThis.location;
+    location.assign(this.logoutUrl);
   }
 
   private async fetchToken(): Promise<string | undefined> {

@@ -26,9 +26,14 @@ type HandlerConfig struct {
 
 	SuccessRedirect     string
 	LogoutRedirect      string
+	LogoutRedirectFunc  LogoutRedirectFunc
 	InvalidStateHandler InvalidStateHandler
 	Now                 func() time.Time
 }
+
+// LogoutRedirectFunc resolves where logout should redirect after the local
+// browser session has been revoked and its cookie has been cleared.
+type LogoutRedirectFunc func(*http.Request) (string, error)
 
 // Handler returns a composed browser auth handler with /login, /callback,
 // /token, and /logout routes relative to its mount point.
@@ -50,9 +55,10 @@ func (b *BrowserAuth) Handler(cfg HandlerConfig) http.Handler {
 		Now:           cfg.Now,
 	}.Handler())
 	mux.Handle("/logout", LogoutHandler{
-		Store:    cfg.Store,
-		Cookie:   cfg.Cookie,
-		Redirect: cfg.LogoutRedirect,
+		Store:        cfg.Store,
+		Cookie:       cfg.Cookie,
+		Redirect:     cfg.LogoutRedirect,
+		RedirectFunc: cfg.LogoutRedirectFunc,
 	}.Handler())
 	if cfg.Issuer != nil {
 		mux.Handle("/.well-known/openid-configuration", cfg.Issuer.MetadataHandler())
@@ -95,9 +101,10 @@ func (b *BrowserAuth) sessionCallback(cfg HandlerConfig) Callback {
 
 // LogoutHandler revokes the current browser session and clears the session cookie.
 type LogoutHandler struct {
-	Store    SessionStore
-	Cookie   SessionCookie
-	Redirect string
+	Store        SessionStore
+	Cookie       SessionCookie
+	Redirect     string
+	RedirectFunc LogoutRedirectFunc
 }
 
 // Handler returns an HTTP logout handler.
@@ -113,6 +120,17 @@ func (h LogoutHandler) Handler() http.Handler {
 			}
 		}
 		h.Cookie.Clear(w)
+		if h.RedirectFunc != nil {
+			redirect, err := h.RedirectFunc(r)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if strings.TrimSpace(redirect) != "" {
+				http.Redirect(w, r, redirect, http.StatusFound)
+				return
+			}
+		}
 		if strings.TrimSpace(h.Redirect) != "" {
 			http.Redirect(w, r, h.Redirect, http.StatusFound)
 			return

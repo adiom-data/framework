@@ -44,6 +44,53 @@ func TestLogoutHandlerRevokesAndClearsSession(t *testing.T) {
 	}
 }
 
+func TestLogoutHandlerUsesRedirectFunc(t *testing.T) {
+	t.Parallel()
+
+	store := memorySessionStore{
+		"sess_1": {
+			ID:        "sess_1",
+			Issuer:    "https://idp.example.com",
+			Subject:   "user-1",
+			ExpiresAt: time.Now().Add(time.Hour),
+		},
+	}
+	called := false
+	handler := LogoutHandler{
+		Store:    store,
+		Cookie:   SessionCookie{},
+		Redirect: "/fallback",
+		RedirectFunc: func(r *http.Request) (string, error) {
+			called = true
+			if r.URL.Path != "/logout" {
+				t.Fatalf("path=%q want /logout", r.URL.Path)
+			}
+			return "https://idp.example.com/logout", nil
+		},
+	}.Handler()
+	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	req.AddCookie(&http.Cookie{Name: DefaultSessionCookieName, Value: "sess_1"})
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if !called {
+		t.Fatal("redirect func was not called")
+	}
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status=%d want %d", rec.Code, http.StatusFound)
+	}
+	if got := rec.Result().Header.Get("Location"); got != "https://idp.example.com/logout" {
+		t.Fatalf("Location=%q want provider logout", got)
+	}
+	if store["sess_1"].RevokedAt.IsZero() {
+		t.Fatal("session was not revoked")
+	}
+	if cookies := rec.Result().Cookies(); len(cookies) == 0 || cookies[0].MaxAge != -1 {
+		t.Fatalf("session cookie was not cleared: %#v", cookies)
+	}
+}
+
 func TestHandlerDefaultsCookiePathToBasePath(t *testing.T) {
 	t.Parallel()
 

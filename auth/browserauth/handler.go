@@ -40,7 +40,7 @@ type LogoutRedirectFunc func(*http.Request) (string, error)
 func (b *BrowserAuth) Handler(cfg HandlerConfig) http.Handler {
 	cfg.Cookie = cfg.Cookie.withDefaultPath(cfg.BasePath)
 	mux := http.NewServeMux()
-	mux.Handle("/login", b.LoginHandler())
+	mux.Handle("/login", b.loginHandler(PublicRedirectURL(callbackPath(cfg.BasePath))))
 	mux.Handle("/callback", b.CallbackHandlerWithConfig(CallbackHandlerConfig{
 		Callback:            b.sessionCallback(cfg),
 		InvalidStateHandler: cfg.InvalidStateHandler,
@@ -65,6 +65,21 @@ func (b *BrowserAuth) Handler(cfg HandlerConfig) http.Handler {
 		mux.Handle("/.well-known/jwks.json", cfg.Issuer.JWKSHandler())
 	}
 	return mux
+}
+
+func callbackPath(basePath string) string {
+	basePath = strings.TrimSpace(basePath)
+	if basePath == "" {
+		return "/callback"
+	}
+	if !strings.HasPrefix(basePath, "/") {
+		basePath = "/" + basePath
+	}
+	basePath = strings.TrimRight(basePath, "/")
+	if basePath == "" {
+		return "/callback"
+	}
+	return basePath + "/callback"
 }
 
 func (b *BrowserAuth) sessionCallback(cfg HandlerConfig) Callback {

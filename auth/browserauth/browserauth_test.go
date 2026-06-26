@@ -1,16 +1,28 @@
 package browserauth
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 
 	"golang.org/x/oauth2"
 )
+
+type fixedStateStore struct{}
+
+func (fixedStateStore) NewSession(http.ResponseWriter, *http.Request) (LoginSession, error) {
+	return LoginSession{State: "state", CodeVerifier: "verifier"}, nil
+}
+
+func (fixedStateStore) VerifySession(http.ResponseWriter, *http.Request, string) (LoginSession, error) {
+	return LoginSession{State: "state", CodeVerifier: "verifier"}, nil
+}
 
 func TestCookieStateStoreRoundTrip(t *testing.T) {
 	t.Parallel()
@@ -344,6 +356,22 @@ func TestCookieStateStoreAllowsExplicitInsecureCookie(t *testing.T) {
 	}
 }
 
+func TestNewRejectsProxyRedirectURLWithStateStoreWithoutReturnTo(t *testing.T) {
+	t.Parallel()
+
+	provider := newOIDCTestProvider(t)
+	_, err := New(context.Background(), Config{
+		Issuer:           provider.URL,
+		ClientID:         "client",
+		ProxyRedirectURL: "https://auth-preview.example.com/callback",
+		StateStore:       fixedStateStore{},
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "state store does not support proxy return URLs") {
+		t.Fatalf("err=%v want proxy return URL state store error", err)
+	}
+}
+
 func TestLoginHandlerUsesPKCE(t *testing.T) {
 	t.Parallel()
 
@@ -533,6 +561,80 @@ func TestLoginHandlerUsesRedirectURLResolver(t *testing.T) {
 	}
 }
 
+func TestLoginHandlerUsesProxyRedirectURLAndStateReturnTo(t *testing.T) {
+	t.Parallel()
+
+	auth := &BrowserAuth{
+		oauth2: oauth2.Config{
+			ClientID:    "client",
+			RedirectURL: "https://auth-preview.example.com/callback",
+			Endpoint: oauth2.Endpoint{
+				AuthURL: "https://accounts.google.com/o/oauth2/v2/auth",
+			},
+			Scopes: []string{"openid"},
+		},
+		proxyRedirectURL: "https://auth-preview.example.com/callback",
+		stateStore:       CookieStateStore{Name: "state"},
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://internal.local/login", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "preview-123.preview.example.com")
+	rec := httptest.NewRecorder()
+
+	auth.Handler(HandlerConfig{BasePath: "/auth"}).ServeHTTP(rec, req)
+
+	redirect, err := url.Parse(rec.Result().Header.Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := redirect.Query().Get("redirect_uri"); got != "https://auth-preview.example.com/callback" {
+		t.Fatalf("redirect_uri=%q want proxy callback", got)
+	}
+	returnTo, err := ProxyStateReturnTo(redirect.Query().Get("state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if returnTo != "https://preview-123.preview.example.com/auth/callback" {
+		t.Fatalf("return_to=%q want preview callback", returnTo)
+	}
+}
+
+func TestLoginHandlerUsesConfiguredRedirectURLAsProxyReturnTo(t *testing.T) {
+	t.Parallel()
+
+	auth := &BrowserAuth{
+		oauth2: oauth2.Config{
+			ClientID:    "client",
+			RedirectURL: "https://auth-preview.example.com/callback",
+			Endpoint: oauth2.Endpoint{
+				AuthURL: "https://accounts.google.com/o/oauth2/v2/auth",
+			},
+			Scopes: []string{"openid"},
+		},
+		appRedirectURL:   "https://fixed-preview.example.com/auth/callback",
+		proxyRedirectURL: "https://auth-preview.example.com/callback",
+		stateStore:       CookieStateStore{Name: "state"},
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://internal.local/login", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "preview-123.preview.example.com")
+	rec := httptest.NewRecorder()
+
+	auth.Handler(HandlerConfig{BasePath: "/auth"}).ServeHTTP(rec, req)
+
+	redirect, err := url.Parse(rec.Result().Header.Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	returnTo, err := ProxyStateReturnTo(redirect.Query().Get("state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if returnTo != "https://fixed-preview.example.com/auth/callback" {
+		t.Fatalf("return_to=%q want configured callback", returnTo)
+	}
+}
+
 func TestCallbackHandlerUsesRedirectURLResolverForTokenExchange(t *testing.T) {
 	t.Parallel()
 
@@ -583,6 +685,125 @@ func TestCallbackHandlerUsesRedirectURLResolverForTokenExchange(t *testing.T) {
 		}
 	default:
 		t.Fatal("token endpoint was not called")
+	}
+}
+
+func TestCallbackHandlerUsesProxyRedirectURLForTokenExchange(t *testing.T) {
+	t.Parallel()
+
+	redirectURIs := make(chan string, 1)
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		redirectURIs <- r.Form.Get("redirect_uri")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"token","token_type":"Bearer"}`))
+	}))
+	defer tokenServer.Close()
+
+	auth := &BrowserAuth{
+		oauth2: oauth2.Config{
+			ClientID:    "client",
+			RedirectURL: "https://auth-preview.example.com/callback",
+			Endpoint: oauth2.Endpoint{
+				TokenURL: tokenServer.URL,
+			},
+			Scopes: []string{"openid"},
+		},
+		redirectURL:      PublicRedirectURL("/auth/callback"),
+		proxyRedirectURL: "https://auth-preview.example.com/callback",
+		stateStore:       CookieStateStore{Name: "state"},
+	}
+	stateRec := httptest.NewRecorder()
+	session, err := auth.stateStore.(ReturnToStateStore).NewSessionWithReturnTo(
+		stateRec,
+		httptest.NewRequest(http.MethodGet, "/auth/login", nil),
+		"https://preview-123.preview.example.com/auth/callback",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/auth/callback?state="+url.QueryEscape(session.State)+"&code=code", nil)
+	req.Header.Set("Cookie", stateRec.Result().Header.Get("Set-Cookie"))
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "preview-123.preview.example.com")
+	rec := httptest.NewRecorder()
+
+	auth.CallbackHandler(func(http.ResponseWriter, *http.Request, Tokens) error {
+		return nil
+	}).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d want %d body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	select {
+	case got := <-redirectURIs:
+		if got != "https://auth-preview.example.com/callback" {
+			t.Fatalf("redirect_uri=%q want proxy callback", got)
+		}
+	default:
+		t.Fatal("token endpoint was not called")
+	}
+}
+
+func TestProxyCallbackForwarderForwardsProviderQuery(t *testing.T) {
+	t.Parallel()
+
+	state, err := encodeProxyState(proxyState{
+		State:    "nonce",
+		ReturnTo: "https://preview-123.preview.example.com/auth/callback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := ProxyCallbackForwarder(ProxyCallbackForwarderConfig{
+		ReturnToValidator: regexp.MustCompile(`^https://[a-z0-9-]+\.preview\.example\.com/auth/callback$`).MatchString,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/callback?code=code&state="+url.QueryEscape(state), nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status=%d want %d body=%q", rec.Code, http.StatusFound, rec.Body.String())
+	}
+	location := rec.Result().Header.Get("Location")
+	redirect, err := url.Parse(location)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := redirect.Scheme + "://" + redirect.Host + redirect.Path; got != "https://preview-123.preview.example.com/auth/callback" {
+		t.Fatalf("redirect target=%q", got)
+	}
+	if got := redirect.Query().Get("code"); got != "code" {
+		t.Fatalf("code=%q want forwarded code", got)
+	}
+	if got := redirect.Query().Get("state"); got != state {
+		t.Fatalf("state=%q want original state", got)
+	}
+}
+
+func TestProxyCallbackForwarderRejectsDisallowedReturnTo(t *testing.T) {
+	t.Parallel()
+
+	state, err := encodeProxyState(proxyState{
+		State:    "nonce",
+		ReturnTo: "https://evil.example.com/auth/callback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := ProxyCallbackForwarder(ProxyCallbackForwarderConfig{
+		ReturnToValidator: regexp.MustCompile(`^https://[a-z0-9-]+\.preview\.example\.com/auth/callback$`).MatchString,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/callback?code=code&state="+url.QueryEscape(state), nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want %d", rec.Code, http.StatusBadRequest)
 	}
 }
 
@@ -659,4 +880,26 @@ func repeatedByte(value byte, size int) []byte {
 		out[i] = value
 	}
 	return out
+}
+
+func newOIDCTestProvider(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	var issuer string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/.well-known/openid-configuration" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"issuer": "` + issuer + `",
+			"authorization_endpoint": "` + issuer + `/authorize",
+			"token_endpoint": "` + issuer + `/token",
+			"jwks_uri": "` + issuer + `/keys"
+		}`))
+	}))
+	issuer = server.URL
+	t.Cleanup(server.Close)
+	return server
 }

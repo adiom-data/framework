@@ -250,6 +250,36 @@ browserauth.Config{
 behind trusted proxy/gateway configuration. Apps that support only certain
 public hosts should wrap the resolver with their own allowlist check.
 
+For preview or development environments with dynamic public hosts, set a stable
+provider callback with `ProxyRedirectURL`. The browser auth handler still owns
+login, PKCE, callback exchange, and the local browser session. The proxy only
+forwards the provider callback back to the app callback URL encoded in OAuth
+state:
+
+```go
+browserauth.Config{
+	// ...
+	ProxyRedirectURL: "https://auth-preview.example.com/callback",
+}
+```
+
+Configure the provider, such as Google, with only the stable proxy callback URL.
+Run the proxy callback with the framework forwarder:
+
+```go
+mux.Handle("/callback", browserauth.ProxyCallbackForwarder(
+	browserauth.ProxyCallbackForwarderConfig{
+		ReturnToValidator: regexp.MustCompile(
+			`^https://[a-z0-9-]+\.preview\.example\.com/auth/callback$`,
+		).MatchString,
+	},
+))
+```
+
+The forwarder does not exchange codes or verify user identity. It extracts the
+app callback URL from state, optionally applies the configured return URL
+constraint, and redirects with the original provider callback query.
+
 When `SessionCookie.Path` is empty, the composed handler defaults it to
 `BasePath`, so the browser session cookie is scoped to the auth mount.
 When `Issuer` is set, the composed handler also serves the matching discovery

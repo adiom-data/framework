@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -39,9 +40,17 @@ type Config struct {
 	Issuer       string
 	ClientID     string
 	ClientSecret string
-	RedirectURL  string
+	// RedirectURL is the OIDC callback URL for normal auth flows. When
+	// ProxyRedirectURL is set, RedirectURL is instead the final app callback URL
+	// that the proxy should forward back to.
+	RedirectURL string
+	// ProxyRedirectURL is the stable OIDC callback URL sent to the provider.
+	// Use this for dynamic app hosts that receive callbacks through a simple
+	// forwarding proxy.
+	ProxyRedirectURL string
 	// RedirectURLResolver resolves the OIDC callback URL for each request.
-	// It overrides RedirectURL when set.
+	// It overrides RedirectURL when set. When ProxyRedirectURL is set, it
+	// resolves the final app callback URL encoded into state.
 	RedirectURLResolver RedirectURLResolver
 	Scopes              []string
 	// AuthCodeOptions are added to the provider authorization redirect.
@@ -54,13 +63,15 @@ type Config struct {
 
 // BrowserAuth manages OIDC browser login and callback flows.
 type BrowserAuth struct {
-	issuer          string
-	provider        *oidc.Provider
-	oauth2          oauth2.Config
-	redirectURL     RedirectURLResolver
-	endSessionURL   string
-	stateStore      StateStore
-	authCodeOptions []oauth2.AuthCodeOption
+	issuer           string
+	provider         *oidc.Provider
+	oauth2           oauth2.Config
+	redirectURL      RedirectURLResolver
+	appRedirectURL   string
+	proxyRedirectURL string
+	endSessionURL    string
+	stateStore       StateStore
+	authCodeOptions  []oauth2.AuthCodeOption
 }
 
 // Tokens are returned after a successful callback exchange.
@@ -95,6 +106,12 @@ type LoginSession struct {
 type StateStore interface {
 	NewSession(http.ResponseWriter, *http.Request) (LoginSession, error)
 	VerifySession(http.ResponseWriter, *http.Request, string) (LoginSession, error)
+}
+
+// ReturnToStateStore creates OAuth state that carries a proxy return URL.
+type ReturnToStateStore interface {
+	StateStore
+	NewSessionWithReturnTo(http.ResponseWriter, *http.Request, string) (LoginSession, error)
 }
 
 // CookieStateKeys configures stable keys for signed and encrypted OAuth state.
@@ -201,6 +218,18 @@ type CookieStateStore struct {
 	Codecs []securecookie.Codec
 }
 
+// ProxyCallbackForwarderConfig configures a callback trampoline that forwards
+// provider callbacks from a stable proxy URL back to the app callback URL
+// encoded in OAuth state.
+type ProxyCallbackForwarderConfig struct {
+	ReturnToValidator func(string) bool
+}
+
+type proxyState struct {
+	State    string `json:"state"`
+	ReturnTo string `json:"return_to"`
+}
+
 // New discovers an OIDC provider and returns browser auth helpers.
 func New(ctx context.Context, cfg Config) (*BrowserAuth, error) {
 	if strings.TrimSpace(cfg.Issuer) == "" {
@@ -210,7 +239,8 @@ func New(ctx context.Context, cfg Config) (*BrowserAuth, error) {
 		return nil, errors.New("browserauth: client ID is required")
 	}
 	redirectURL := strings.TrimSpace(cfg.RedirectURL)
-	if redirectURL == "" && cfg.RedirectURLResolver == nil {
+	proxyRedirectURL := strings.TrimSpace(cfg.ProxyRedirectURL)
+	if redirectURL == "" && cfg.RedirectURLResolver == nil && proxyRedirectURL == "" {
 		return nil, errors.New("browserauth: redirect URL is required")
 	}
 	if redirectURL != "" {
@@ -219,6 +249,13 @@ func New(ctx context.Context, cfg Config) (*BrowserAuth, error) {
 			return nil, err
 		}
 		redirectURL = validRedirectURL
+	}
+	if proxyRedirectURL != "" {
+		validProxyRedirectURL, err := validateRedirectURL(proxyRedirectURL)
+		if err != nil {
+			return nil, err
+		}
+		proxyRedirectURL = validProxyRedirectURL
 	}
 	providerCtx := ctx
 	if providerCtx == nil {
@@ -245,6 +282,15 @@ func New(ctx context.Context, cfg Config) (*BrowserAuth, error) {
 	if stateStore == nil {
 		stateStore = CookieStateStore{Keys: cfg.StateKeys}
 	}
+	if proxyRedirectURL != "" {
+		if _, ok := stateStore.(ReturnToStateStore); !ok {
+			return nil, errors.New("browserauth: state store does not support proxy return URLs")
+		}
+	}
+	providerRedirectURL := redirectURL
+	if proxyRedirectURL != "" {
+		providerRedirectURL = proxyRedirectURL
+	}
 	return &BrowserAuth{
 		issuer:   strings.TrimRight(cfg.Issuer, "/"),
 		provider: provider,
@@ -252,13 +298,15 @@ func New(ctx context.Context, cfg Config) (*BrowserAuth, error) {
 			ClientID:     cfg.ClientID,
 			ClientSecret: cfg.ClientSecret,
 			Endpoint:     provider.Endpoint(),
-			RedirectURL:  redirectURL,
+			RedirectURL:  providerRedirectURL,
 			Scopes:       scopes,
 		},
-		endSessionURL:   strings.TrimSpace(metadata.EndSessionURL),
-		redirectURL:     cfg.RedirectURLResolver,
-		stateStore:      stateStore,
-		authCodeOptions: append([]oauth2.AuthCodeOption(nil), cfg.AuthCodeOptions...),
+		endSessionURL:    strings.TrimSpace(metadata.EndSessionURL),
+		redirectURL:      cfg.RedirectURLResolver,
+		appRedirectURL:   redirectURL,
+		proxyRedirectURL: proxyRedirectURL,
+		stateStore:       stateStore,
+		authCodeOptions:  append([]oauth2.AuthCodeOption(nil), cfg.AuthCodeOptions...),
 	}, nil
 }
 
@@ -316,13 +364,17 @@ func (b *BrowserAuth) RefreshSession(ctx context.Context, session Session) (Sess
 
 // LoginHandler redirects the browser to the OIDC provider.
 func (b *BrowserAuth) LoginHandler() http.Handler {
+	return b.loginHandler(nil)
+}
+
+func (b *BrowserAuth) loginHandler(proxyReturnURL RedirectURLResolver) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		oauth2Config, err := b.oauth2Config(r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		session, err := b.stateStore.NewSession(w, r)
+		session, err := b.newLoginSession(w, r, proxyReturnURL)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -331,6 +383,34 @@ func (b *BrowserAuth) LoginHandler() http.Handler {
 		options = append(options, oauth2.S256ChallengeOption(session.CodeVerifier))
 		http.Redirect(w, r, oauth2Config.AuthCodeURL(session.State, options...), http.StatusFound)
 	})
+}
+
+func (b *BrowserAuth) newLoginSession(w http.ResponseWriter, r *http.Request, proxyReturnURL RedirectURLResolver) (LoginSession, error) {
+	if strings.TrimSpace(b.proxyRedirectURL) == "" {
+		return b.stateStore.NewSession(w, r)
+	}
+	returnTo, err := b.proxyReturnURL(r, proxyReturnURL)
+	if err != nil {
+		return LoginSession{}, err
+	}
+	store, ok := b.stateStore.(ReturnToStateStore)
+	if !ok {
+		return LoginSession{}, errors.New("browserauth: state store does not support proxy return URLs")
+	}
+	return store.NewSessionWithReturnTo(w, r, returnTo)
+}
+
+func (b *BrowserAuth) proxyReturnURL(r *http.Request, override RedirectURLResolver) (string, error) {
+	if b.redirectURL != nil {
+		return b.redirectURL(r)
+	}
+	if strings.TrimSpace(b.appRedirectURL) != "" {
+		return b.appRedirectURL, nil
+	}
+	if override != nil {
+		return override(r)
+	}
+	return inferCallbackURL(r)
 }
 
 // CallbackHandler exchanges the authorization code and invokes callback.
@@ -403,6 +483,42 @@ func PublicRedirectURL(callbackPath string) RedirectURLResolver {
 	}
 }
 
+// ProxyCallbackForwarder returns a handler for a stable callback proxy. It
+// extracts the app callback URL from OAuth state and forwards the original
+// provider callback query to that URL.
+func ProxyCallbackForwarder(cfg ProxyCallbackForwarderConfig) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		returnTo, err := ProxyStateReturnTo(r.URL.Query().Get("state"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if cfg.ReturnToValidator != nil && !cfg.ReturnToValidator(returnTo) {
+			http.Error(w, "browserauth: proxy return URL is not allowed", http.StatusBadRequest)
+			return
+		}
+		redirect, err := validateRedirectURL(returnTo)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		redirect = appendRawQuery(redirect, r.URL.RawQuery)
+		http.Redirect(w, r, redirect, http.StatusFound)
+	})
+}
+
+// ProxyStateReturnTo extracts the app callback URL from proxy-mode OAuth state.
+func ProxyStateReturnTo(state string) (string, error) {
+	payload, err := decodeProxyState(state)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(payload.ReturnTo) == "" {
+		return "", errors.New("browserauth: proxy return URL is required")
+	}
+	return payload.ReturnTo, nil
+}
+
 // EndSessionLogoutRedirect redirects logout through the provider end-session endpoint.
 func (b *BrowserAuth) EndSessionLogoutRedirect(postLogoutRedirectURI string) LogoutRedirectFunc {
 	return func(*http.Request) (string, error) {
@@ -428,6 +544,10 @@ func (b *BrowserAuth) OAuth2Config() oauth2.Config {
 
 func (b *BrowserAuth) oauth2Config(r *http.Request) (oauth2.Config, error) {
 	cfg := b.oauth2
+	if strings.TrimSpace(b.proxyRedirectURL) != "" {
+		cfg.RedirectURL = b.proxyRedirectURL
+		return cfg, nil
+	}
 	if b.redirectURL != nil {
 		redirectURL, err := b.redirectURL(r)
 		if err != nil {
@@ -478,6 +598,35 @@ func publicURL(r *http.Request, path string, label string) (string, error) {
 	return validateRedirectURL(strings.TrimRight(baseURL, "/") + path)
 }
 
+func inferCallbackURL(r *http.Request) (string, error) {
+	if r == nil {
+		return "", errors.New("browserauth: request is required")
+	}
+	path := strings.TrimSpace(r.URL.Path)
+	if path == "" || path == "/" {
+		path = "/callback"
+	} else if strings.HasSuffix(path, "/login") {
+		path = strings.TrimSuffix(path, "/login") + "/callback"
+	}
+	return publicURL(r, path, "callback path")
+}
+
+func appendRawQuery(rawURL string, rawQuery string) string {
+	if strings.TrimSpace(rawQuery) == "" {
+		return rawURL
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	if parsed.RawQuery == "" {
+		parsed.RawQuery = rawQuery
+	} else {
+		parsed.RawQuery += "&" + rawQuery
+	}
+	return parsed.String()
+}
+
 func (b *BrowserAuth) endSessionRedirect(postLogoutRedirectURI string) (string, error) {
 	endSessionURL := strings.TrimSpace(b.endSessionURL)
 	if endSessionURL == "" {
@@ -526,6 +675,32 @@ func (s CookieStateStore) NewSession(w http.ResponseWriter, _ *http.Request) (Lo
 	}
 	session := LoginSession{
 		State:        state,
+		CodeVerifier: oauth2.GenerateVerifier(),
+	}
+	value, err := s.encodeSession(session)
+	if err != nil {
+		return LoginSession{}, err
+	}
+	http.SetCookie(w, s.cookie(value, 300))
+	return session, nil
+}
+
+// NewSessionWithReturnTo implements ReturnToStateStore.
+func (s CookieStateStore) NewSessionWithReturnTo(w http.ResponseWriter, _ *http.Request, returnTo string) (LoginSession, error) {
+	state, err := randomState()
+	if err != nil {
+		return LoginSession{}, err
+	}
+	returnTo, err = validateRedirectURL(returnTo)
+	if err != nil {
+		return LoginSession{}, err
+	}
+	encodedState, err := encodeProxyState(proxyState{State: state, ReturnTo: returnTo})
+	if err != nil {
+		return LoginSession{}, err
+	}
+	session := LoginSession{
+		State:        encodedState,
 		CodeVerifier: oauth2.GenerateVerifier(),
 	}
 	value, err := s.encodeSession(session)
@@ -589,6 +764,39 @@ func randomState() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func encodeProxyState(state proxyState) (string, error) {
+	if strings.TrimSpace(state.State) == "" {
+		return "", errors.New("browserauth: proxy state nonce is required")
+	}
+	if strings.TrimSpace(state.ReturnTo) == "" {
+		return "", errors.New("browserauth: proxy return URL is required")
+	}
+	payload, err := json.Marshal(state)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(payload), nil
+}
+
+func decodeProxyState(state string) (proxyState, error) {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return proxyState{}, ErrMissingState
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(state)
+	if err != nil {
+		return proxyState{}, ErrInvalidState
+	}
+	var decoded proxyState
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		return proxyState{}, ErrInvalidState
+	}
+	if strings.TrimSpace(decoded.State) == "" {
+		return proxyState{}, ErrInvalidState
+	}
+	return decoded, nil
 }
 
 func (s CookieStateStore) encodeSession(session LoginSession) (string, error) {

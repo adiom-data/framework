@@ -4,7 +4,8 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
-	"time"
+
+	"github.com/felixge/httpsnoop"
 )
 
 // Middleware wraps an HTTP handler. The first middleware in a list is outermost.
@@ -25,14 +26,12 @@ func LogRequests(logger *slog.Logger) Middleware {
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-			start := time.Now()
-			next.ServeHTTP(recorder, r)
+			metrics := httpsnoop.CaptureMetrics(next, w, r)
 			logger.InfoContext(r.Context(), "http request",
 				"method", r.Method,
 				"route", routePattern(r),
-				"status", recorder.status,
-				"duration", time.Since(start),
+				"status", metrics.Code,
+				"duration", metrics.Duration,
 			)
 		})
 	}
@@ -67,18 +66,4 @@ func routePattern(r *http.Request) string {
 		return "unknown_route"
 	}
 	return r.Pattern
-}
-
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-}
-
-func (r *statusRecorder) WriteHeader(status int) {
-	r.status = status
-	r.ResponseWriter.WriteHeader(status)
-}
-
-func (r *statusRecorder) Unwrap() http.ResponseWriter {
-	return r.ResponseWriter
 }

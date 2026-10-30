@@ -54,13 +54,14 @@ func TestVerifierVerify(t *testing.T) {
 	}
 
 	token := signToken(t, key, map[string]any{
-		"iss":       issuer,
-		"sub":       "user-1",
-		"aud":       []string{"service"},
-		"exp":       time.Now().Add(time.Hour).Unix(),
-		"iat":       time.Now().Unix(),
-		"client_id": "client",
-		"email":     "dev@example.com",
+		"iss":        issuer,
+		"sub":        "user-1",
+		"aud":        []string{"service"},
+		"exp":        time.Now().Add(time.Hour).Unix(),
+		"iat":        time.Now().Unix(),
+		"client_id":  "client",
+		"email":      "dev@example.com",
+		"account_id": int64(9007199254740993),
 	})
 	claims, err := verifier.Verify(context.Background(), token)
 	if err != nil {
@@ -71,6 +72,13 @@ func TestVerifierVerify(t *testing.T) {
 	}
 	if claims.String("email") != "dev@example.com" {
 		t.Fatalf("email = %q, want dev@example.com", claims.String("email"))
+	}
+	accountID, ok := claims.Raw["account_id"].(json.Number)
+	if !ok {
+		t.Fatalf("account_id type = %T, want json.Number", claims.Raw["account_id"])
+	}
+	if accountID.String() != "9007199254740993" {
+		t.Fatalf("account_id = %q, want 9007199254740993", accountID)
 	}
 }
 

@@ -1,6 +1,7 @@
 package jwtauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -40,13 +41,16 @@ type Claims struct {
 	jwt.Claims
 }
 
-// UnmarshalJSON stores every claim in Raw while decoding registered claims.
+// UnmarshalJSON stores every claim in Raw, preserving numbers as json.Number,
+// while decoding registered claims.
 func (c *Claims) UnmarshalJSON(data []byte) error {
 	type registeredClaims jwt.Claims
 	if err := json.Unmarshal(data, (*registeredClaims)(&c.Claims)); err != nil {
 		return err
 	}
-	if err := json.Unmarshal(data, &c.Raw); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&c.Raw); err != nil {
 		return err
 	}
 	return nil

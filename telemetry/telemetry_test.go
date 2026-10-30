@@ -310,17 +310,20 @@ func TestLowCardinalityMetricViews(t *testing.T) {
 	}
 
 	rpcStream, ok := views[2](sdkmetric.Instrument{
-		Name:  "rpc.server.duration",
+		Name:  "rpc.server.call.duration",
 		Scope: instrumentation.Scope{Name: "connectrpc.com/otelconnect"},
 	})
 	if !ok {
 		t.Fatal("rpc metric view did not match")
 	}
-	if _, ok := views[2](sdkmetric.Instrument{Name: "rpc.server.duration"}); ok {
+	if _, ok := views[2](sdkmetric.Instrument{Name: "rpc.server.call.duration"}); ok {
 		t.Fatal("rpc metric view should only match otelconnect scope")
 	}
-	if !rpcStream.AttributeFilter(attribute.String("rpc.service", "adiom.app.v1.AppService")) {
-		t.Fatal("rpc.service should be kept")
+	if !rpcStream.AttributeFilter(attribute.String("rpc.system.name", "connectrpc")) {
+		t.Fatal("rpc.system.name should be kept")
+	}
+	if !rpcStream.AttributeFilter(attribute.String("rpc.response.status_code", "OK")) {
+		t.Fatal("rpc.response.status_code should be kept")
 	}
 	if rpcStream.AttributeFilter(attribute.String("net.peer.name", "10.0.0.1")) {
 		t.Fatal("net.peer.name should be dropped")

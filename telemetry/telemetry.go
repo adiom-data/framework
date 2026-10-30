@@ -249,8 +249,6 @@ func ConnectInterceptor(cfg Config) (connect.Interceptor, error) {
 	options := []otelconnect.Option{
 		otelconnect.WithPropagator(Propagator()),
 		otelconnect.WithTrustRemote(),
-		otelconnect.WithoutTraceEvents(),
-		otelconnect.WithoutServerPeerAttributes(),
 	}
 	if !cfg.tracesEnabled() {
 		options = append(options, otelconnect.WithoutTracing())
@@ -356,12 +354,10 @@ func lowCardinalityMetricViews() []metric.View {
 				Scope: instrumentation.Scope{Name: "connectrpc.com/otelconnect"},
 			},
 			metric.Stream{AttributeFilter: attribute.NewAllowKeysFilter(
-				"rpc.system",
-				"rpc.service",
+				"rpc.system.name",
 				"rpc.method",
-				"rpc.grpc.status_code",
-				"rpc.connect_rpc.error_code",
-				"http.response.status_code",
+				"rpc.response.status_code",
+				"error.type",
 			)},
 		),
 	}

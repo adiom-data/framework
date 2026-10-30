@@ -13,7 +13,7 @@ func TestHTTPServerDefaults(t *testing.T) {
 		Handler: http.NewServeMux(),
 	}
 
-	got, err := server.httpServer()
+	got, err := server.httpServer(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestHTTPServerTimeoutOverrides(t *testing.T) {
 		ShutdownTimeout:   4 * time.Second,
 	}
 
-	got, err := server.httpServer()
+	got, err := server.httpServer(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestHTTPServerTimeoutOverrides(t *testing.T) {
 }
 
 func TestHTTPServerRequiresHandler(t *testing.T) {
-	if _, err := (Server{Addr: "127.0.0.1:0"}).httpServer(); err == nil {
+	if _, err := (Server{Addr: "127.0.0.1:0"}).httpServer(context.Background()); err == nil {
 		t.Fatal("expected missing Handler error")
 	}
 }
@@ -64,7 +64,7 @@ func TestHTTPServerTLSConfigSelectsTLSProtocols(t *testing.T) {
 	got, err := (Server{
 		Handler:   http.NewServeMux(),
 		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
-	}).httpServer()
+	}).httpServer(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestHTTPServerTLSFilesSelectTLSProtocols(t *testing.T) {
 		Handler:     http.NewServeMux(),
 		TLSCertFile: "/certs/tls.crt",
 		TLSKeyFile:  "/certs/tls.key",
-	}).httpServer()
+	}).httpServer(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +91,27 @@ func TestHTTPServerRejectsPartialTLSFiles(t *testing.T) {
 	_, _, err := (Server{TLSCertFile: "/certs/tls.crt"}).tlsCertFiles()
 	if err == nil {
 		t.Fatal("expected partial TLS file config error")
+	}
+}
+
+func TestHTTPServerBaseContextUsesRunContext(t *testing.T) {
+	type contextKey struct{}
+	runCtx, cancel := context.WithCancel(context.WithValue(context.Background(), contextKey{}, "value"))
+
+	server, err := (Server{Handler: http.NewServeMux()}).httpServer(runCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestCtx := server.BaseContext(nil)
+	if got := requestCtx.Value(contextKey{}); got != "value" {
+		t.Fatalf("base context value = %v, want value", got)
+	}
+
+	cancel()
+	select {
+	case <-requestCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("base context was not canceled with run context")
 	}
 }
 

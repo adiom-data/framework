@@ -60,7 +60,7 @@ func (s Server) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	srv, err := s.httpServer()
+	srv, err := s.httpServer(ctx)
 	if err != nil {
 		return err
 	}
@@ -105,13 +105,14 @@ func (s Server) Run(ctx context.Context) error {
 	}
 }
 
-func (s Server) httpServer() (*http.Server, error) {
+func (s Server) httpServer(baseContext context.Context) (*http.Server, error) {
 	if s.Handler == nil {
 		return nil, errors.New("httpserver: Handler is required")
 	}
 	srv := &http.Server{
 		Addr:              s.addr(),
 		Handler:           s.Handler,
+		BaseContext:       func(net.Listener) context.Context { return baseContext },
 		ReadHeaderTimeout: s.readHeaderTimeout(),
 		IdleTimeout:       s.idleTimeout(),
 		Protocols:         s.httpProtocols(),

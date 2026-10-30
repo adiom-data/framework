@@ -135,8 +135,9 @@ matches the tenant namespace collector service. Exporters send traces to
 `/v1/traces` and metrics to `/v1/metrics`.
 
 Connect services get `connectrpc.com/otelconnect` instrumentation automatically,
-including RPC spans, trace context propagation, and RPC metrics such as
-`rpc.server.duration`, request size, response size, and messages per RPC.
+including RPC spans, trace context propagation, and the
+`rpc.server.call.duration` and `rpc.client.call.duration` histograms measured in
+seconds.
 Regular HTTP routes get `otelhttp` instrumentation. Connect routes are filtered
 out of the generic HTTP middleware so they do not emit duplicate HTTP and RPC
 server spans.

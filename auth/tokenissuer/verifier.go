@@ -51,7 +51,7 @@ func NewRemoteVerifier(ctx context.Context, cfg RemoteVerifierConfig) (*RemoteVe
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	issuer := strings.TrimRight(strings.TrimSpace(cfg.Issuer), "/")
+	issuer := cfg.Issuer
 	clockSkew := cfg.ClockSkew
 	if clockSkew <= 0 {
 		clockSkew = defaultVerifierClockSkew

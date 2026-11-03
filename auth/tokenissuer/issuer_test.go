@@ -60,6 +60,9 @@ func TestIssuerMintsAndVerifiesToken(t *testing.T) {
 	if claims.Subject != "user-1" {
 		t.Fatalf("subject=%q want user-1", claims.Subject)
 	}
+	if claims.Issuer != "https://auth.example.com/" {
+		t.Fatalf("issuer=%q want https://auth.example.com/", claims.Issuer)
+	}
 	if claims.Scope != "read write" {
 		t.Fatalf("scope=%q want read write", claims.Scope)
 	}
@@ -234,7 +237,7 @@ func TestIssuerMetadataHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 	issuer, err := New(Config{
-		Issuer:      "https://auth.example.com",
+		Issuer:      "https://auth.example.com/",
 		ActiveKeyID: "test-key",
 		Keys:        []SigningKey{{KeyID: "test-key", PrivateKey: privateKey}},
 	})
@@ -248,8 +251,8 @@ func TestIssuerMetadataHandler(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if metadata.Issuer != "https://auth.example.com" {
-		t.Fatalf("issuer=%q want https://auth.example.com", metadata.Issuer)
+	if metadata.Issuer != "https://auth.example.com/" {
+		t.Fatalf("issuer=%q want https://auth.example.com/", metadata.Issuer)
 	}
 	if metadata.JWKSURI != "https://auth.example.com/.well-known/jwks.json" {
 		t.Fatalf("jwks_uri=%q", metadata.JWKSURI)

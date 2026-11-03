@@ -151,7 +151,7 @@ func New(cfg Config) (*Issuer, error) {
 		return nil, err
 	}
 	return &Issuer{
-		issuer:    strings.TrimRight(cfg.Issuer, "/"),
+		issuer:    cfg.Issuer,
 		audience:  cfg.Audience,
 		activeKey: activeKey,
 		keys:      keys,
@@ -352,7 +352,7 @@ func (i *Issuer) MetadataHandler() http.Handler {
 func (i *Issuer) Metadata() Metadata {
 	return Metadata{
 		Issuer:                           i.issuer,
-		JWKSURI:                          i.issuer + "/.well-known/jwks.json",
+		JWKSURI:                          strings.TrimSuffix(i.issuer, "/") + "/.well-known/jwks.json",
 		IDTokenSigningAlgValuesSupported: i.supportedAlgorithmNames(),
 	}
 }

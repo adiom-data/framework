@@ -84,10 +84,9 @@ type Verifier struct {
 
 // NewVerifier validates config and returns a JWT verifier.
 func NewVerifier(cfg Config) (*Verifier, error) {
-	if cfg.Issuer == "" {
+	if strings.TrimSpace(cfg.Issuer) == "" {
 		return nil, errors.New("jwtauth: issuer is required")
 	}
-	cfg.Issuer = normalizeIssuer(cfg.Issuer)
 	if cfg.ClockSkew <= 0 {
 		cfg.ClockSkew = defaultClockSkew
 	}
@@ -134,7 +133,7 @@ func (v *Verifier) Verify(ctx context.Context, tokenString string) (*Claims, err
 }
 
 func (v *Verifier) validateClaims(claims *Claims) error {
-	if normalizeIssuer(claims.Issuer) != normalizeIssuer(v.issuer) {
+	if claims.Issuer != v.issuer {
 		return fmt.Errorf("issuer %q does not match %q", claims.Issuer, v.issuer)
 	}
 	if claims.Expiry == nil {
@@ -240,10 +239,6 @@ func (c *Claims) String(name string) string {
 	}
 	stringValue, _ := value.(string)
 	return stringValue
-}
-
-func normalizeIssuer(issuer string) string {
-	return strings.TrimRight(issuer, "/")
 }
 
 func ctxWithHTTPClient(ctx context.Context, client *http.Client) context.Context {

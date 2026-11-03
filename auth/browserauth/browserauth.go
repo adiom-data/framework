@@ -264,7 +264,7 @@ func New(ctx context.Context, cfg Config) (*BrowserAuth, error) {
 	if cfg.HTTPClient != nil {
 		providerCtx = oidc.ClientContext(providerCtx, cfg.HTTPClient)
 	}
-	provider, err := oidc.NewProvider(providerCtx, strings.TrimRight(cfg.Issuer, "/"))
+	provider, err := oidc.NewProvider(providerCtx, cfg.Issuer)
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +292,7 @@ func New(ctx context.Context, cfg Config) (*BrowserAuth, error) {
 		providerRedirectURL = proxyRedirectURL
 	}
 	return &BrowserAuth{
-		issuer:   strings.TrimRight(cfg.Issuer, "/"),
+		issuer:   cfg.Issuer,
 		provider: provider,
 		oauth2: oauth2.Config{
 			ClientID:     cfg.ClientID,

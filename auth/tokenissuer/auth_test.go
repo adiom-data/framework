@@ -183,6 +183,43 @@ func TestRemoteVerifierSkipsAudienceWhenUnconfigured(t *testing.T) {
 	}
 }
 
+func TestRemoteVerifierPreservesTrailingSlashIssuer(t *testing.T) {
+	t.Parallel()
+
+	privateKey, err := GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	issuerURL := server.URL + "/"
+	issuer, err := New(Config{
+		Issuer:      issuerURL,
+		ActiveKeyID: "test-key",
+		Keys:        []SigningKey{{KeyID: "test-key", PrivateKey: privateKey}},
+		TTL:         time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux.Handle("/.well-known/openid-configuration", issuer.MetadataHandler())
+	mux.Handle("/.well-known/jwks.json", issuer.JWKSHandler())
+
+	verifier, err := NewRemoteVerifier(context.Background(), RemoteVerifierConfig{Issuer: issuerURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := mintTestToken(t, issuer, auth.Identity{Subject: "user-1"})
+	claims, err := verifier.Verify(context.Background(), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Issuer != issuerURL {
+		t.Fatalf("issuer=%q want %q", claims.Issuer, issuerURL)
+	}
+}
+
 func TestLazyRemoteVerifierDoesNotDiscoverAtConstruction(t *testing.T) {
 	t.Parallel()
 

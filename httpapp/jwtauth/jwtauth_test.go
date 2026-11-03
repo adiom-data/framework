@@ -46,7 +46,7 @@ func TestVerifierVerify(t *testing.T) {
 	issuer := testIssuer(t, key)
 
 	verifier, err := NewVerifier(Config{
-		Issuer:           issuer + "/",
+		Issuer:           issuer,
 		AllowedAudiences: []string{"service"},
 	})
 	if err != nil {
@@ -79,6 +79,46 @@ func TestVerifierVerify(t *testing.T) {
 	}
 	if accountID.String() != "9007199254740993" {
 		t.Fatalf("account_id = %q, want 9007199254740993", accountID)
+	}
+}
+
+func TestVerifierPreservesTrailingSlashIssuer(t *testing.T) {
+	t.Parallel()
+
+	key := testKey(t)
+	issuer := testIssuerWithSuffix(t, key, "/")
+	verifier, err := NewVerifier(Config{Issuer: issuer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := signToken(t, key, map[string]any{
+		"iss": issuer,
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	claims, err := verifier.Verify(context.Background(), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Issuer != issuer {
+		t.Fatalf("Issuer = %q, want %q", claims.Issuer, issuer)
+	}
+}
+
+func TestVerifierRejectsTrailingSlashIssuerMismatch(t *testing.T) {
+	t.Parallel()
+
+	key := testKey(t)
+	issuer := testIssuer(t, key)
+	verifier, err := NewVerifier(Config{Issuer: issuer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := signToken(t, key, map[string]any{
+		"iss": issuer + "/",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	if _, err := verifier.Verify(context.Background(), token); err == nil {
+		t.Fatal("Verify() succeeded for mismatched issuer")
 	}
 }
 
@@ -272,13 +312,18 @@ func TestMiddlewareRejectsMissingBearer(t *testing.T) {
 
 func testIssuer(t *testing.T, key *rsa.PrivateKey) string {
 	t.Helper()
-	var issuer string
+	return testIssuerWithSuffix(t, key, "")
+}
+
+func testIssuerWithSuffix(t *testing.T, key *rsa.PrivateKey, suffix string) string {
+	t.Helper()
+	var issuer, jwksURI string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
 			if err := json.NewEncoder(w).Encode(map[string]string{
 				"issuer":   issuer,
-				"jwks_uri": issuer + "/jwks",
+				"jwks_uri": jwksURI,
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -290,7 +335,8 @@ func testIssuer(t *testing.T, key *rsa.PrivateKey) string {
 			http.NotFound(w, r)
 		}
 	}))
-	issuer = server.URL
+	issuer = server.URL + suffix
+	jwksURI = server.URL + "/jwks"
 	t.Cleanup(server.Close)
 	return issuer
 }

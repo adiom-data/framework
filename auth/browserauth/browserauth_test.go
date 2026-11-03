@@ -372,6 +372,23 @@ func TestNewRejectsProxyRedirectURLWithStateStoreWithoutReturnTo(t *testing.T) {
 	}
 }
 
+func TestNewPreservesTrailingSlashIssuer(t *testing.T) {
+	t.Parallel()
+
+	_, issuer := newOIDCTestProviderWithSuffix(t, "/")
+	auth, err := New(context.Background(), Config{
+		Issuer:      issuer,
+		ClientID:    "client",
+		RedirectURL: "https://app.example.com/auth/callback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auth.issuer != issuer {
+		t.Fatalf("issuer=%q want %q", auth.issuer, issuer)
+	}
+}
+
 func TestLoginHandlerUsesPKCE(t *testing.T) {
 	t.Parallel()
 
@@ -884,8 +901,14 @@ func repeatedByte(value byte, size int) []byte {
 
 func newOIDCTestProvider(t *testing.T) *httptest.Server {
 	t.Helper()
+	server, _ := newOIDCTestProviderWithSuffix(t, "")
+	return server
+}
 
-	var issuer string
+func newOIDCTestProviderWithSuffix(t *testing.T, suffix string) (*httptest.Server, string) {
+	t.Helper()
+
+	var issuer, endpointBase string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/.well-known/openid-configuration" {
 			http.NotFound(w, r)
@@ -894,12 +917,13 @@ func newOIDCTestProvider(t *testing.T) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"issuer": "` + issuer + `",
-			"authorization_endpoint": "` + issuer + `/authorize",
-			"token_endpoint": "` + issuer + `/token",
-			"jwks_uri": "` + issuer + `/keys"
+			"authorization_endpoint": "` + endpointBase + `/authorize",
+			"token_endpoint": "` + endpointBase + `/token",
+			"jwks_uri": "` + endpointBase + `/keys"
 		}`))
 	}))
-	issuer = server.URL
+	endpointBase = server.URL
+	issuer = endpointBase + suffix
 	t.Cleanup(server.Close)
-	return server
+	return server, issuer
 }

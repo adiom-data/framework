@@ -490,6 +490,10 @@ mux.Handle("/auth/callback", browserAuth.CallbackHandler(complete))
 ```
 
 `CallbackHandler` validates state and verifies tokens before invoking completion.
+Provider-reported login errors return a generic HTTP 400. Code exchange and
+ID-token verification failures return a generic HTTP 502; provider response
+bodies, transport errors, and claim-validation details are kept out of the
+browser response.
 `BeforeCreate` runs after session construction and lifetime defaults, before
 persisting the session, setting its cookie, or redirecting. An error prevents
 those completion steps. Return or wrap `auth.ErrPermissionDenied` for a generic

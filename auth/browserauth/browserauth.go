@@ -437,6 +437,8 @@ func (b *BrowserAuth) CallbackHandler(callback Callback) http.Handler {
 }
 
 // CallbackHandlerWithConfig exchanges the authorization code and invokes callback.
+// Provider rejections, exchange failures, and ID-token verification failures use
+// fixed HTTP error messages rather than exposing provider or verifier details.
 func (b *BrowserAuth) CallbackHandlerWithConfig(cfg CallbackHandlerConfig) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callback := cfg.Callback
@@ -454,7 +456,7 @@ func (b *BrowserAuth) CallbackHandlerWithConfig(cfg CallbackHandlerConfig) http.
 			return
 		}
 		if providerErr := r.URL.Query().Get("error"); providerErr != "" {
-			http.Error(w, providerErr, http.StatusBadRequest)
+			http.Error(w, "Login was not completed.", http.StatusBadRequest)
 			return
 		}
 		oauth2Config, err := b.oauth2Config(r)
@@ -465,7 +467,7 @@ func (b *BrowserAuth) CallbackHandlerWithConfig(cfg CallbackHandlerConfig) http.
 		ctx := b.clientContext(r.Context())
 		token, err := oauth2Config.Exchange(ctx, r.URL.Query().Get("code"), oauth2.VerifierOption(session.CodeVerifier))
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			http.Error(w, "Unable to authenticate with identity provider.", http.StatusBadGateway)
 			return
 		}
 		rawIDToken, _ := token.Extra("id_token").(string)
@@ -473,7 +475,7 @@ func (b *BrowserAuth) CallbackHandlerWithConfig(cfg CallbackHandlerConfig) http.
 		if rawIDToken != "" {
 			claims, err = b.verifyIDToken(ctx, rawIDToken)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadGateway)
+				http.Error(w, "Unable to authenticate with identity provider.", http.StatusBadGateway)
 				return
 			}
 		}

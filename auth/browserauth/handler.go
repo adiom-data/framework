@@ -23,12 +23,32 @@ type HandlerConfig struct {
 	Refresher     SessionRefresher
 	RefreshLeeway time.Duration
 	SessionTTL    time.Duration
+	// BeforeCreate runs application checks and may attach trusted metadata.
+	// An error prevents creation of the session and its cookie.
+	// Return or wrap auth.ErrPermissionDenied for a safe HTTP 403 response.
+	BeforeCreate func(*http.Request, Tokens, *Session) error
 
 	SuccessRedirect     string
 	LogoutRedirect      string
 	LogoutRedirectFunc  LogoutRedirectFunc
 	InvalidStateHandler InvalidStateHandler
 	Now                 func() time.Time
+}
+
+// SessionCallbackConfig configures completion of a verified browser login.
+type SessionCallbackConfig struct {
+	Store           SessionStore
+	Cookie          SessionCookie
+	BasePath        string
+	SessionTTL      time.Duration
+	SuccessRedirect string
+	Now             func() time.Time
+	// BeforeCreate runs after session construction and lifetime defaults, but
+	// before persistence, setting the session cookie, or redirecting. It may
+	// reject login or attach application-owned metadata. It must not write a
+	// response. Return or wrap auth.ErrPermissionDenied for HTTP 403; other
+	// errors produce HTTP 500. CallbackHandler keeps error details private.
+	BeforeCreate func(*http.Request, Tokens, *Session) error
 }
 
 // LogoutRedirectFunc resolves where logout should redirect after the local
@@ -42,7 +62,11 @@ func (b *BrowserAuth) Handler(cfg HandlerConfig) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/login", b.loginHandler(PublicRedirectURL(callbackPath(cfg.BasePath))))
 	mux.Handle("/callback", b.CallbackHandlerWithConfig(CallbackHandlerConfig{
-		Callback:            b.sessionCallback(cfg),
+		Callback: b.SessionCallback(SessionCallbackConfig{
+			Store: cfg.Store, Cookie: cfg.Cookie, BasePath: cfg.BasePath,
+			SessionTTL: cfg.SessionTTL, SuccessRedirect: cfg.SuccessRedirect,
+			Now: cfg.Now, BeforeCreate: cfg.BeforeCreate,
+		}),
 		InvalidStateHandler: cfg.InvalidStateHandler,
 	}))
 	mux.Handle("/token", TokenEndpoint{
@@ -82,7 +106,12 @@ func callbackPath(basePath string) string {
 	return basePath + "/callback"
 }
 
-func (b *BrowserAuth) sessionCallback(cfg HandlerConfig) Callback {
+// SessionCallback returns a reusable create-session, set-cookie, redirect
+// callback. Pass it to CallbackHandler (which verifies OAuth state and tokens),
+// or invoke it from a custom callback after its application checks. Tokens must
+// come from a successful, verified OIDC callback.
+func (b *BrowserAuth) SessionCallback(cfg SessionCallbackConfig) Callback {
+	cfg.Cookie = cfg.Cookie.withDefaultPath(cfg.BasePath)
 	return func(w http.ResponseWriter, r *http.Request, tokens Tokens) error {
 		if cfg.Store == nil {
 			return errors.New("browserauth: session store is not configured")
@@ -100,6 +129,11 @@ func (b *BrowserAuth) sessionCallback(cfg HandlerConfig) Callback {
 			ttl = DefaultSessionTTL
 		}
 		session.ExpiresAt = now.Add(ttl)
+		if cfg.BeforeCreate != nil {
+			if err := cfg.BeforeCreate(r, tokens, &session); err != nil {
+				return err
+			}
+		}
 		session, err = cfg.Store.Create(r.Context(), session)
 		if err != nil {
 			return err

@@ -11,6 +11,10 @@ type ExternalIdentity struct {
 	Issuer  string
 	Subject string
 	Claims  map[string]any
+	// Metadata is application-owned provenance supplied by trusted server code,
+	// separate from upstream claims and caller-requested exchange targets.
+	// It is not automatically included in issued tokens.
+	Metadata map[string]string
 	// Audiences and Resources are requested exchange targets, not verified
 	// permissions. The application authorizer must validate them.
 	Audiences []string

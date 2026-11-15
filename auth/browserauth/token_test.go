@@ -90,6 +90,7 @@ func TestTokenEndpointRefreshesSession(t *testing.T) {
 			Subject:           "upstream-1",
 			RefreshToken:      "refresh-1",
 			Claims:            map[string]any{"email": "old@example.com"},
+			Metadata:          map[string]string{"connection_id": "trusted"},
 			ExpiresAt:         time.Now().Add(time.Hour),
 			UpstreamExpiresAt: time.Now().Add(30 * time.Second),
 		},
@@ -97,14 +98,21 @@ func TestTokenEndpointRefreshesSession(t *testing.T) {
 	endpoint := TokenEndpoint{
 		Store: store,
 		Refresher: refresherFunc(func(_ context.Context, session Session) (Session, error) {
+			if session.Metadata["connection_id"] != "trusted" {
+				t.Fatal("refresher did not receive session metadata")
+			}
 			session.RefreshToken = "refresh-2"
-			session.Claims = map[string]any{"email": "new@example.com"}
+			session.Claims = map[string]any{"email": "new@example.com", "metadata": map[string]any{"connection_id": "idp-value"}}
 			return session, nil
 		}),
 		Authorizer: auth.AuthorizerFunc(func(_ context.Context, external auth.ExternalIdentity) (auth.Identity, error) {
 			if external.Claims["email"] != "new@example.com" {
 				t.Fatalf("email claim=%v want new@example.com", external.Claims["email"])
 			}
+			if external.Metadata["connection_id"] != "trusted" {
+				t.Fatal("authorizer lost trusted session metadata")
+			}
+			external.Metadata["connection_id"] = "authorizer-mutation"
 			return auth.Identity{Subject: "user-1"}, nil
 		}),
 		Issuer: issuer,
@@ -117,6 +125,9 @@ func TestTokenEndpointRefreshesSession(t *testing.T) {
 	}
 	if got := store["sess_1"].RefreshToken; got != "refresh-2" {
 		t.Fatalf("refresh token=%q want refresh-2", got)
+	}
+	if store["sess_1"].Metadata["connection_id"] != "trusted" {
+		t.Fatal("authorizer mutated stored metadata")
 	}
 }
 

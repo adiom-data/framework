@@ -87,7 +87,7 @@ curl https://app.example.com/oauth/token \
   --data-urlencode 'resource=https://api.example.com/jobs'
 ```
 
-`subject_token` is the existing signed credential, not the issued API access
+`subject_token` is the signed upstream credential, not the issued API access
 token. It is verified by the configured exchanger; declaring it a JWT does not
 establish trust. Put the API key exchanger before a general OIDC JWT exchanger
 in a chain so that API credentials are recognized before OIDC verification.
@@ -100,7 +100,7 @@ Authorization header are not interpreted by this handler. Applications that
 require client authentication must enforce it in middleware and may pass the
 authenticated client to their authorizer through context.
 
-The existing `auth.Authorizer` receives the verified external identity with:
+The `auth.Authorizer` receives the verified external identity with:
 
 - `Claims["requested_scopes"]` as normalized `[]string`, from the credential,
   the HTTP `scope` parameter, or both. If both sources request non-empty scopes,
@@ -162,7 +162,7 @@ return auth.Identity{
 ```
 
 Non-empty `Identity.Aud` overrides `tokenissuer.Config.Audience`; nil or empty
-uses the existing configured default. Requested targets are never automatically
+uses the configured default. Requested targets are never automatically
 copied into the output token. Consumers must configure their expected audience
 independently (for example, `RemoteVerifierConfig.AllowedAudiences`). Local
 `Issuer.Verify` continues to require the issuer's configured default audience.
@@ -182,7 +182,7 @@ A successful response contains our usual signed application JWT:
 The response always reports the actual granted scope, even when the application
 chooses scopes different from the request. Token responses and OAuth JSON error
 responses include `Cache-Control: no-store` and `Pragma: no-cache`. The client
-uses the access token in the existing `Authorization: Bearer ...` API path.
+uses the access token in `Authorization: Bearer ...` for API requests.
 This endpoint implements the token exchange grant, not MCP's interactive
 authorization code/PKCE or enterprise ID-JAG flows.
 
@@ -440,6 +440,70 @@ configured refresh leeway. The default leeway is one minute. Stores can
 implement `browserauth.SessionUpdateStore` to coordinate concurrent refreshes;
 `SQLSessionStore` does this with a row lock.
 
+`browserauth.Config.HTTPClient` applies to discovery, JWKS retrieval, authorization
+code exchange, and refresh. An explicitly configured client takes precedence
+over one in the operation context. When unset, operations use the client in
+their context or Go's default HTTP client. Operation cancellation and deadlines
+are retained.
+
+### Application-owned session metadata and custom callbacks
+
+Advanced integrations can attach provider/connection provenance to
+`Session.Metadata` (`map[string]string`). It is separate from IdP `Claims` and
+is preserved when upstream tokens and claims refresh. The refresher receives
+it on `Session`; the authorizer receives a copy as `ExternalIdentity.Metadata`.
+The framework does not automatically put it in the final API JWT. Populate it
+from validated application configuration, not IdP claims or unvalidated callback
+parameters. Resolve current permissions through the authorizer as usual.
+
+Metadata persistence is **opt-in** for `SQLSessionStore`. Set `MetadataColumn`
+to the name of a JSONB column in the [session table](#browser-session-schema):
+
+```go
+store := browserauth.SQLSessionStore{DB: db, MetadataColumn: "metadata"}
+```
+
+With `MetadataColumn` unset, the SQL store returns
+`browserauth.ErrSessionMetadataDisabled` if asked to write non-empty metadata.
+Custom session stores must persist metadata on creation and updates, including
+transactional refresh updates. Session metadata may be empty; applications
+decide whether their checks require it. Applications with multiple provider
+connections still select the appropriate refresher using their connection ID.
+
+Use the public `SessionCallback` helper when a custom callback needs the standard
+session creation, cookie, and redirect sequence:
+
+```go
+complete := browserAuth.SessionCallback(browserauth.SessionCallbackConfig{
+	Store:           store,
+	BasePath:        "/auth", // defaults the session cookie path
+	SuccessRedirect: "/",
+	BeforeCreate: func(r *http.Request, tokens browserauth.Tokens, session *browserauth.Session) error {
+		if err := checkLogin(r.Context(), tokens); err != nil {
+			return err
+		}
+		session.Metadata = map[string]string{"connection_id": configuredConnectionID}
+		return nil
+	},
+})
+mux.Handle("/auth/callback", browserAuth.CallbackHandler(complete))
+```
+
+`CallbackHandler` validates state and verifies tokens before invoking completion.
+`BeforeCreate` runs after session construction and lifetime defaults, before
+persisting the session, setting its cookie, or redirecting. An error prevents
+those completion steps. Return or wrap `auth.ErrPermissionDenied` for a generic
+HTTP 403 response; other callback errors produce a generic HTTP 500. Original
+error details are not sent to the browser. The hook must not write a response.
+A custom callback can also call
+`complete(w, r, tokens)` after its own checks. Only pass tokens from a verified
+OIDC callback. Configure the same cookie path/name on separately mounted token
+and logout handlers.
+
+The composed `browserAuth.Handler` uses the same helper and exposes the optional
+hook as `HandlerConfig.BeforeCreate`. Configure `SessionTTL`, `Cookie`, and
+`SuccessRedirect` to control session completion.
+
 Browser auth cookies default to `HttpOnly`, `Secure`, and `SameSite=Lax`.
 Local HTTP development can opt into insecure cookies explicitly. The temporary
 OAuth state/PKCE cookie is signed and encrypted. For multiple replicas, provide
@@ -498,7 +562,8 @@ application HTTP layer.
 ## Browser Session Schema
 
 The framework defines the `browserauth.SessionStore` interface and includes a
-Postgres-compatible `browserauth.SQLSessionStore`. Run a migration like this:
+Postgres-compatible `browserauth.SQLSessionStore`. Create the session table with
+the following schema:
 
 ```sql
 create table auth_sessions (
@@ -509,6 +574,9 @@ create table auth_sessions (
 
   refresh_token text not null,
   claims jsonb not null default '{}'::jsonb,
+
+  -- Optional: enable with SQLSessionStore.MetadataColumn = "metadata".
+  -- metadata jsonb not null default '{}'::jsonb,
 
   expires_at timestamptz not null,
   upstream_expires_at timestamptz,

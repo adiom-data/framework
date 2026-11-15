@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -22,7 +23,11 @@ type Session struct {
 	Subject      string
 	RefreshToken string
 	Claims       map[string]any
-	ExpiresAt    time.Time
+	// Metadata stores application-owned provenance, such as connection IDs.
+	// Populate it from trusted application configuration, not IdP claims or
+	// unvalidated callback parameters. Stores must preserve it across updates.
+	Metadata  map[string]string
+	ExpiresAt time.Time
 	// UpstreamExpiresAt is the expiration of the upstream OIDC token state.
 	// It is separate from ExpiresAt, which is this browser session's lifetime.
 	UpstreamExpiresAt time.Time
@@ -73,9 +78,10 @@ func (s Session) ExternalIdentity() (auth.ExternalIdentity, error) {
 		return auth.ExternalIdentity{}, errors.New("browserauth: session subject is required")
 	}
 	return auth.ExternalIdentity{
-		Issuer:  s.Issuer,
-		Subject: s.Subject,
-		Claims:  s.Claims,
+		Issuer:   s.Issuer,
+		Subject:  s.Subject,
+		Claims:   s.Claims,
+		Metadata: maps.Clone(s.Metadata),
 	}, nil
 }
 

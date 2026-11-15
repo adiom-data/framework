@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/adiom-data/framework/auth"
 	"github.com/adiom-data/framework/httputil"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gorilla/securecookie"
@@ -56,9 +57,11 @@ type Config struct {
 	// AuthCodeOptions are added to the provider authorization redirect.
 	// Use this for provider-specific parameters such as Google offline access.
 	AuthCodeOptions []oauth2.AuthCodeOption
-	HTTPClient      *http.Client
-	StateStore      StateStore
-	StateKeys       CookieStateKeys
+	// HTTPClient is used for discovery, JWKS, code exchange, and refresh.
+	// When non-nil it takes precedence over clients in operation contexts.
+	HTTPClient *http.Client
+	StateStore StateStore
+	StateKeys  CookieStateKeys
 }
 
 // BrowserAuth manages OIDC browser login and callback flows.
@@ -72,6 +75,7 @@ type BrowserAuth struct {
 	endSessionURL    string
 	stateStore       StateStore
 	authCodeOptions  []oauth2.AuthCodeOption
+	httpClient       *http.Client
 }
 
 // Tokens are returned after a successful callback exchange.
@@ -81,7 +85,9 @@ type Tokens struct {
 	Claims      map[string]any
 }
 
-// Callback handles tokens after a successful OIDC callback.
+// Callback handles tokens after a successful OIDC callback. Return or wrap
+// auth.ErrPermissionDenied to reject login with HTTP 403. Other errors produce
+// HTTP 500. CallbackHandler does not expose returned error details to clients.
 type Callback func(http.ResponseWriter, *http.Request, Tokens) error
 
 // RedirectURLResolver resolves the OIDC callback URL for a request.
@@ -307,7 +313,18 @@ func New(ctx context.Context, cfg Config) (*BrowserAuth, error) {
 		proxyRedirectURL: proxyRedirectURL,
 		stateStore:       stateStore,
 		authCodeOptions:  append([]oauth2.AuthCodeOption(nil), cfg.AuthCodeOptions...),
+		httpClient:       cfg.HTTPClient,
 	}, nil
+}
+
+// clientContext retains the operation's cancellation, deadline, and values while
+// consistently applying the explicitly configured client. Without one, OAuth's
+// existing context-client/default-client behavior is preserved.
+func (b *BrowserAuth) clientContext(ctx context.Context) context.Context {
+	if b.httpClient != nil {
+		return oidc.ClientContext(ctx, b.httpClient)
+	}
+	return ctx
 }
 
 // SessionFromTokens converts a successful callback token set into a browser session.
@@ -332,11 +349,12 @@ func (b *BrowserAuth) SessionFromTokens(tokens Tokens) (Session, error) {
 	}, nil
 }
 
-// RefreshSession refreshes upstream OIDC token state for session.
+// RefreshSession refreshes upstream OIDC token state, preserving session metadata.
 func (b *BrowserAuth) RefreshSession(ctx context.Context, session Session) (Session, error) {
 	if strings.TrimSpace(session.RefreshToken) == "" {
 		return session, nil
 	}
+	ctx = b.clientContext(ctx)
 	tokenSource := b.oauth2.TokenSource(ctx, &oauth2.Token{RefreshToken: session.RefreshToken})
 	token, err := tokenSource.Token()
 	if err != nil {
@@ -444,7 +462,8 @@ func (b *BrowserAuth) CallbackHandlerWithConfig(cfg CallbackHandlerConfig) http.
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		token, err := oauth2Config.Exchange(r.Context(), r.URL.Query().Get("code"), oauth2.VerifierOption(session.CodeVerifier))
+		ctx := b.clientContext(r.Context())
+		token, err := oauth2Config.Exchange(ctx, r.URL.Query().Get("code"), oauth2.VerifierOption(session.CodeVerifier))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -452,14 +471,18 @@ func (b *BrowserAuth) CallbackHandlerWithConfig(cfg CallbackHandlerConfig) http.
 		rawIDToken, _ := token.Extra("id_token").(string)
 		claims := map[string]any{}
 		if rawIDToken != "" {
-			claims, err = b.verifyIDToken(r.Context(), rawIDToken)
+			claims, err = b.verifyIDToken(ctx, rawIDToken)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadGateway)
 				return
 			}
 		}
 		if err := callback(w, r, Tokens{OAuth2Token: token, IDToken: rawIDToken, Claims: claims}); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			if errors.Is(err, auth.ErrPermissionDenied) {
+				http.Error(w, "Login is not permitted.", http.StatusForbidden)
+			} else {
+				http.Error(w, "Unable to complete login.", http.StatusInternalServerError)
+			}
 		}
 	})
 }

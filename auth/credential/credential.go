@@ -9,8 +9,13 @@ import (
 )
 
 var (
+	// ErrUnsupported means the exchanger does not handle this credential.
+	// A chain tries the next exchanger, or rejects it if none supports it.
 	ErrUnsupported = errors.New("credential: unsupported credential")
-	ErrInvalid     = errors.New("credential: invalid credential")
+	// ErrInvalid marks a credential rejection, including unknown/revoked keys.
+	// Custom exchangers and lookup functions should wrap it for such failures;
+	// unclassified errors are treated as operational failures by authservice.
+	ErrInvalid = errors.New("credential: invalid credential")
 )
 
 // Result is the verified upstream identity from a credential exchange.

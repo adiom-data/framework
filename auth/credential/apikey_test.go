@@ -2,9 +2,49 @@ package credential
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
+
+func TestAPIKeyExchangerClassifiesValidationAndLookupFailures(t *testing.T) {
+	t.Parallel()
+	pair, err := GenerateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := SignAPIKey(pair.ID, pair.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongKey, err := GenerateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchanger := APIKeyExchanger{Lookup: func(context.Context, string) (APIKeyRecord, error) {
+		return APIKeyRecord{ID: pair.ID, PublicKey: wrongKey.PublicKey}, nil
+	}}
+	if _, err := exchanger.ExchangeCredential(context.Background(), token); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("signature error=%v want ErrInvalid", err)
+	}
+	expired, err := SignAssertion(pair.ID, pair.PrivateKey, nil, time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchanger.Lookup = func(context.Context, string) (APIKeyRecord, error) {
+		return APIKeyRecord{ID: pair.ID, PublicKey: pair.PublicKey}, nil
+	}
+	if _, err := exchanger.ExchangeCredential(context.Background(), expired); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("expired error=%v want ErrInvalid", err)
+	}
+	lookupFailure := errors.New("database unavailable")
+	exchanger.Lookup = func(context.Context, string) (APIKeyRecord, error) {
+		return APIKeyRecord{}, lookupFailure
+	}
+	if _, err := exchanger.ExchangeCredential(context.Background(), token); !errors.Is(err, lookupFailure) || errors.Is(err, ErrInvalid) {
+		t.Fatalf("lookup error=%v should retain operational category", err)
+	}
+}
 
 func TestAPIKeyExchanger(t *testing.T) {
 	t.Parallel()

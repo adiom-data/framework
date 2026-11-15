@@ -188,6 +188,7 @@ func IdentityFromClaims(claims *Claims) auth.Identity {
 	return auth.Identity{
 		Subject:    claims.Subject,
 		Scopes:     claimScopes(claims),
+		Aud:        append([]string(nil), claims.Audience...),
 		Attributes: copyStringMap(claims.Attributes),
 		Claims:     copyAnyMap(claims.Custom),
 	}

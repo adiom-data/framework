@@ -22,6 +22,9 @@ const (
 var (
 	ErrMissingBearerToken = errors.New("missing bearer token")
 	ErrInvalidBearerToken = errors.New("invalid bearer token")
+	// ErrVerifierUnavailable means remote verification keys could not be loaded,
+	// rather than that a supplied credential was rejected.
+	ErrVerifierUnavailable = errors.New("JWT verification unavailable")
 )
 
 // Config configures JWT verification against an OIDC issuer.
@@ -114,20 +117,28 @@ func NewVerifier(cfg Config) (*Verifier, error) {
 }
 
 // Verify validates tokenString and returns its claims.
+// Rejected tokens wrap ErrInvalidBearerToken; remote key retrieval failures
+// wrap ErrVerifierUnavailable. Underlying errors are preserved for inspection.
 func (v *Verifier) Verify(ctx context.Context, tokenString string) (*Claims, error) {
 	if v == nil {
 		return nil, errors.New("jwtauth: nil verifier")
 	}
 	payload, err := v.keySet.VerifySignature(ctx, tokenString)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidBearerToken, err)
+		// RemoteKeySet wraps key retrieval failures (including cancellation),
+		// while malformed JWTs and invalid signatures are leaf errors. Keep
+		// that distinction instead of marking an issuer outage as a bad token.
+		if errors.Unwrap(err) != nil {
+			return nil, fmt.Errorf("%w: %w", ErrVerifierUnavailable, err)
+		}
+		return nil, fmt.Errorf("%w: %w", ErrInvalidBearerToken, err)
 	}
 	claims := &Claims{}
 	if err := json.Unmarshal(payload, claims); err != nil {
-		return nil, fmt.Errorf("%w: decode claims: %v", ErrInvalidBearerToken, err)
+		return nil, fmt.Errorf("%w: decode claims: %w", ErrInvalidBearerToken, err)
 	}
 	if err := v.validateClaims(claims); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidBearerToken, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidBearerToken, err)
 	}
 	return claims, nil
 }

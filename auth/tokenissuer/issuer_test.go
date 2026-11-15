@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,66 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
 )
+
+func TestIssuerIdentityAudienceOverride(t *testing.T) {
+	t.Parallel()
+	key, err := GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := Config{
+		Issuer: "https://auth.example.com", Audience: "default-api", ActiveKeyID: "key",
+		Keys: []SigningKey{{KeyID: "key", PrivateKey: key}},
+	}
+	issuer, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		aud, want []string
+	}{
+		{"unset", nil, []string{"default-api"}},
+		{"empty", []string{}, []string{"default-api"}},
+		{"override", []string{"jobs-api"}, []string{"jobs-api"}},
+		{"multiple", []string{"jobs-api", "mcp-api"}, []string{"jobs-api", "mcp-api"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			token, _, err := issuer.Mint(context.Background(), auth.Identity{Subject: "user-1", Aud: tc.aud})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The receiving service selects its expected audience independently
+			// of the issuer's default for issuance.
+			verifierConfig := config
+			verifierConfig.Audience = tc.want[len(tc.want)-1]
+			verifier, err := New(verifierConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claims, err := verifier.Verify(token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal([]string(claims.Audience), tc.want) {
+				t.Fatalf("audience=%v want=%v", claims.Audience, tc.want)
+			}
+			identity := IdentityFromClaims(claims)
+			if !slices.Equal(identity.Aud, tc.want) {
+				t.Fatalf("identity audience=%v", identity.Aud)
+			}
+			identity.Aud[0] = "mutated"
+			if !slices.Equal([]string(claims.Audience), tc.want) {
+				t.Fatal("identity audience aliases verified claims")
+			}
+			if tc.name == "override" || tc.name == "multiple" {
+				if _, err := issuer.Verify(token); err == nil {
+					t.Fatal("default audience verifier accepted another target's token")
+				}
+			}
+		})
+	}
+}
 
 func TestIssuerMintsAndVerifiesToken(t *testing.T) {
 	t.Parallel()

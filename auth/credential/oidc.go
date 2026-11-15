@@ -2,6 +2,8 @@ package credential
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/adiom-data/framework/auth"
 	"github.com/adiom-data/framework/httpapp/jwtauth"
@@ -24,6 +26,12 @@ func (e OIDCJWTExchanger) ExchangeCredential(ctx context.Context, credential str
 	}
 	claims, err := e.Verifier.Verify(ctx, token)
 	if err != nil {
+		if errors.Is(err, jwtauth.ErrVerifierUnavailable) {
+			return Result{}, fmt.Errorf("%w: %w", auth.ErrUnavailable, err)
+		}
+		if errors.Is(err, jwtauth.ErrInvalidBearerToken) {
+			return Result{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+		}
 		return Result{}, err
 	}
 	mapper := e.Map

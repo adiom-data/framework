@@ -33,6 +33,8 @@ type APIKeyRecord struct {
 }
 
 // APIKeyLookup loads an API key record by credential ID.
+// Return ErrInvalid for unknown, revoked, or disabled credentials. Preserve
+// operational errors instead of marking them as credential rejections.
 type APIKeyLookup func(context.Context, string) (APIKeyRecord, error)
 
 // APIKeyExchanger verifies Ed25519 API key credentials.
@@ -140,7 +142,7 @@ func (e APIKeyExchanger) ExchangeCredential(ctx context.Context, credential stri
 	}
 	claims, err := VerifyAPIKey(token, record.PublicKey, e.now())
 	if err != nil {
-		return Result{}, err
+		return Result{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 	external := auth.ExternalIdentity{
 		Issuer:  e.issuer(),

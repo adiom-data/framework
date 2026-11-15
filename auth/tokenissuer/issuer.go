@@ -246,7 +246,9 @@ func (i *Issuer) Mint(ctx context.Context, identity auth.Identity) (string, time
 			Expiry:   josejwt.NewNumericDate(expiresAt),
 		},
 	}
-	if i.audience != "" {
+	if len(identity.Aud) > 0 {
+		claims.Audience = append(josejwt.Audience(nil), identity.Aud...)
+	} else if i.audience != "" {
 		claims.Audience = josejwt.Audience{i.audience}
 	}
 	if err := validateCustomClaims(claims.Custom); err != nil {

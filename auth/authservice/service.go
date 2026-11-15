@@ -40,15 +40,15 @@ func (s *Service) ExchangeCredential(ctx context.Context, req *connect.Request[a
 	}
 	result, err := s.Exchanger.ExchangeCredential(ctx, req.Msg.GetCredential())
 	if err != nil {
-		return nil, connect.NewError(connect.CodeUnauthenticated, err)
+		return nil, connectExchangeFailure(err)
 	}
 	identity, err := s.Authorizer.Authorize(ctx, result.ExternalIdentity)
 	if err != nil {
-		return nil, err
+		return nil, connectExchangeFailure(err)
 	}
 	token, _, err := s.Issuer.Mint(ctx, identity)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, connect.NewError(connect.CodeInternal, &exchangeFailure{message: "Unable to issue access token.", cause: err})
 	}
 	return connect.NewResponse(&authv1.ExchangeCredentialResponse{AccessToken: token}), nil
 }

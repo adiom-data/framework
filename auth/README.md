@@ -20,7 +20,8 @@ service.
 - `auth/credential` verifies presented credentials and extracts upstream
   identities.
 - `auth/authservice` wires credential verification, app authorization, and token
-  minting into the generated Connect `AuthService`.
+  minting into the generated Connect `AuthService` and an optional RFC 8693 HTTP
+  token exchange handler.
 - `auth/browserauth` is experimental. It provides optional OIDC browser
   login/callback helpers with PKCE for future server-owned browser session
   flows.
@@ -45,8 +46,8 @@ Credential exchange then becomes:
 
 ```go
 exchanger := credential.Chain{
-	credential.OIDCJWTExchanger{Verifier: externalVerifier},
 	credential.APIKeyExchanger{Lookup: lookupAPIKey},
+	credential.OIDCJWTExchanger{Verifier: externalVerifier},
 }
 
 svc := authservice.New(exchanger, authorizer, issuer)
@@ -60,6 +61,130 @@ credential -> verified external identity -> app authorizer -> final identity -> 
 
 `auth.ExternalIdentity` is the upstream issuer/subject/claims. `auth.Identity`
 is the final identity minted into application API bearer tokens.
+
+## RFC 8693 HTTP Token Exchange
+
+Applications can expose the same credential exchange through an HTTP handler,
+with or without mounting the Connect service:
+
+```go
+svc := authservice.New(exchanger, authorizer, issuer)
+mux.Handle("/oauth/token", svc.TokenExchangeHandler())
+```
+
+The application chooses the URL and serves it over HTTPS. Clients configure
+that URL directly; this handler does not add discovery endpoints. It accepts
+form encoded POST requests using the RFC 8693 token exchange grant, with a JWT
+subject and an access token output:
+
+```sh
+curl https://app.example.com/oauth/token \
+  --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+  --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:jwt' \
+  --data-urlencode "subject_token=$API_CREDENTIAL" \
+  --data-urlencode 'scope=jobs:read' \
+  --data-urlencode 'audience=jobs-api' \
+  --data-urlencode 'resource=https://api.example.com/jobs'
+```
+
+`subject_token` is the existing signed credential, not the issued API access
+token. It is verified by the configured exchanger; declaring it a JWT does not
+establish trust. Put the API key exchanger before a general OIDC JWT exchanger
+in a chain so that API credentials are recognized before OIDC verification.
+
+Optional `requested_token_type` must be
+`urn:ietf:params:oauth:token-type:access_token`. Other input/output types and
+actor tokens are rejected. The handler does not issue refresh tokens or perform
+separate OAuth client authentication: `client_id`, client secrets, and the
+Authorization header are not interpreted by this handler. Applications that
+require client authentication must enforce it in middleware and may pass the
+authenticated client to their authorizer through context.
+
+The existing `auth.Authorizer` receives the verified external identity with:
+
+- `Claims["requested_scopes"]` as normalized `[]string`, from the credential,
+  the HTTP `scope` parameter, or both. If both sources request non-empty scopes,
+  their normalized sets must match; differences reject the exchange before
+  authorization. Claims returned by the exchanger are copied, not mutated.
+- `Audiences` and `Resources` as requested targets, including repeated
+  `audience` and `resource` parameters. These are caller-controlled requests,
+  not verified permissions. The authorizer must validate them and map them to
+  approved token audiences. Resources must be absolute URIs without fragments.
+
+The authorizer returns the final `Identity.Scopes` and optionally `Identity.Aud`.
+The handler does not impose a scope policy or automatically intersect scopes;
+the application owns downscoping, defaults, and entitlement checks. Signed
+`requested_scopes` are requests, not the API credential's permission ceiling;
+load allowed permissions from application-owned credential/user records.
+Return or wrap `authservice.ErrInvalidScope` or `authservice.ErrInvalidTarget`
+to produce the corresponding OAuth error. Return or wrap
+`auth.ErrPermissionDenied` for other policy rejections. Unclassified errors are
+server failures, not authorization rejections. Internal error details are not
+returned to the client.
+
+Both the Connect and HTTP exchange interfaces classify wrapped errors:
+
+| Error category | HTTP response | Connect code |
+| --- | --- | --- |
+| `credential.ErrInvalid` / `credential.ErrUnsupported` | 400 `invalid_request` | `Unauthenticated` |
+| `auth.ErrPermissionDenied` | 400 `invalid_request` | `PermissionDenied` |
+| `authservice.ErrInvalidScope` / `ErrInvalidTarget` | 400 `invalid_scope` / `invalid_target` | `InvalidArgument` |
+| `auth.ErrUnavailable` or network failure | 503 `temporarily_unavailable` | `Unavailable` |
+| Context deadline / cancellation | 503 `temporarily_unavailable` | `DeadlineExceeded` / `Canceled` |
+| Unclassified failure | 500 `server_error` | `Internal` |
+
+Existing typed Connect errors are recognized as well: for example,
+`CodeUnavailable` produces HTTP 503 rather than an invalid-credential response.
+Client-facing messages are generic; Connect errors retain the original cause
+for server-side `errors.Is`/`errors.As` inspection.
+
+Custom exchangers and `APIKeyLookup` functions must distinguish rejection from
+infrastructure errors. An unknown, revoked, or disabled key should return
+`credential.ErrInvalid`; a database outage should return its operational error
+or wrap `auth.ErrUnavailable` to mark it retryable. For example:
+
+```go
+return auth.Identity{}, fmt.Errorf("%w: %w", auth.ErrUnavailable, databaseErr)
+```
+
+The built-in API credential exchanger marks signature/expiry failures as invalid
+credentials and preserves lookup failures. The OIDC exchanger distinguishes JWT
+rejection from JWKS retrieval failures, which are treated as unavailable.
+
+For example, an approved identity could be:
+
+```go
+return auth.Identity{
+	Subject: "user_123",
+	Scopes:  []string{"jobs:read"},
+	Aud:     []string{"jobs-api"},
+}, nil
+```
+
+Non-empty `Identity.Aud` overrides `tokenissuer.Config.Audience`; nil or empty
+uses the existing configured default. Requested targets are never automatically
+copied into the output token. Consumers must configure their expected audience
+independently (for example, `RemoteVerifierConfig.AllowedAudiences`). Local
+`Issuer.Verify` continues to require the issuer's configured default audience.
+
+A successful response contains our usual signed application JWT:
+
+```json
+{
+  "access_token": "...",
+  "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+  "token_type": "Bearer",
+  "expires_in": 600,
+  "scope": "jobs:read"
+}
+```
+
+The response always reports the actual granted scope, even when the application
+chooses scopes different from the request. Token responses and OAuth JSON error
+responses include `Cache-Control: no-store` and `Pragma: no-cache`. The client
+uses the access token in the existing `Authorization: Bearer ...` API path.
+This endpoint implements the token exchange grant, not MCP's interactive
+authorization code/PKCE or enterprise ID-JAG flows.
 
 ## Issuer Endpoints
 

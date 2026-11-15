@@ -11,17 +11,25 @@ type ExternalIdentity struct {
 	Issuer  string
 	Subject string
 	Claims  map[string]any
+	// Audiences and Resources are requested exchange targets, not verified
+	// permissions. The application authorizer must validate them.
+	Audiences []string
+	Resources []string
 }
 
 // Identity is the final identity minted into application access tokens.
 type Identity struct {
-	Subject    string
-	Scopes     []string
+	Subject string
+	Scopes  []string
+	// Aud overrides the token issuer's default audience when non-empty.
+	Aud        []string
 	Attributes map[string]string
 	Claims     map[string]any
 }
 
 // Authorizer maps a verified upstream identity to a final token identity.
+// Return ErrPermissionDenied for policy rejection and ErrUnavailable for a
+// temporary dependency failure. Wrap underlying causes for server-side logging.
 type Authorizer interface {
 	Authorize(context.Context, ExternalIdentity) (Identity, error)
 }

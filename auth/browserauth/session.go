@@ -37,6 +37,9 @@ type Session struct {
 }
 
 // SessionStore stores browser auth sessions behind an opaque cookie id.
+// Get should return or wrap ErrInvalidSession for an unknown session.
+// Preserve operational errors, or wrap auth.ErrUnavailable to mark a
+// temporary dependency failure. SQLSessionStore marks sql.ErrNoRows accordingly.
 type SessionStore interface {
 	Create(context.Context, Session) (Session, error)
 	Get(context.Context, string) (Session, error)
@@ -47,6 +50,7 @@ type SessionStore interface {
 // SessionUpdateStore updates a session while holding any store-specific lock.
 // Stores that support refresh-token rotation should implement this to prevent
 // concurrent refresh requests from overwriting each other.
+// Return or wrap ErrInvalidSession for an unknown session; preserve other errors.
 type SessionUpdateStore interface {
 	UpdateSession(context.Context, string, func(Session) (Session, error)) (Session, error)
 }

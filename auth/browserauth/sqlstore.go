@@ -174,6 +174,9 @@ func (s SQLSessionStore) scanSession(row sessionScanner) (Session, error) {
 	}
 	err := row.Scan(dest...)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Session{}, fmt.Errorf("%w: %w", ErrInvalidSession, err)
+		}
 		return Session{}, err
 	}
 	session.RefreshToken = refreshToken.String

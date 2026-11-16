@@ -449,9 +449,37 @@ final JWT as its `Authorization: Bearer ...` token for API calls.
 
 The browser token endpoint returns generic errors: HTTP 401 for invalid or
 missing sessions, HTTP 403 for explicit policy rejections, HTTP 503 for explicitly
-unavailable dependencies or canceled/timed-out operations, and HTTP 500 for
-unclassified authorization or issuance failures. `TokenEndpoint.Mint` retains
-original causes for server-side inspection; HTTP responses omit their details.
+unavailable dependencies, network failures, provider HTTP 429/5xx responses,
+provider `temporarily_unavailable`/`server_error` responses, or canceled/timed-out
+operations, and HTTP 500 for unclassified server failures. Rejected refresh
+credentials (`invalid_grant`) require a new login; provider client-configuration
+errors such as `invalid_client` are server failures.
+
+Custom handlers can call `browserauth.TokenErrorStatus(err)` on errors from
+`TokenEndpoint.Mint` to use the same classification as the built-in handler.
+It returns HTTP 200 for nil. For example:
+
+```go
+token, err := endpoint.Mint(r)
+if err != nil {
+	status := browserauth.TokenErrorStatus(err)
+	// Log err server-side; send a generic response without its details.
+	http.Error(w, "Unable to issue access token.", status)
+	return
+}
+// Send token in the application's response format.
+```
+
+Custom session stores and refreshers should return or wrap
+`browserauth.ErrInvalidSession` for unknown sessions or rejected credentials.
+Preserve operational errors; wrap `auth.ErrUnavailable` when a dependency is
+temporarily unavailable. The SQL store marks missing rows as invalid sessions
+while retaining `sql.ErrNoRows` as a cause. Temporary failures take precedence
+over invalid-session markers. An unknown store, refresh, authorization, or
+issuance error returns HTTP 500 rather than requiring a new login.
+`TokenEndpoint.Mint` retains original causes for `errors.Is`/`errors.As`;
+HTTP responses omit their details. The built-in handler does not clear the
+browser cookie or revoke the session on server failures.
 
 The browser session stores upstream auth state, not final app scopes. Final
 scopes should be resolved each time a new API token is minted. `SessionTTL` is

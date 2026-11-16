@@ -361,7 +361,7 @@ func (b *BrowserAuth) RefreshSession(ctx context.Context, session Session) (Sess
 	tokenSource := b.oauth2.TokenSource(ctx, &oauth2.Token{RefreshToken: session.RefreshToken})
 	token, err := tokenSource.Token()
 	if err != nil {
-		return Session{}, err
+		return Session{}, refreshCredentialError(err)
 	}
 	if token.RefreshToken != "" {
 		session.RefreshToken = token.RefreshToken
@@ -377,7 +377,7 @@ func (b *BrowserAuth) RefreshSession(ctx context.Context, session Session) (Sess
 	}
 	subject, _ := claims["sub"].(string)
 	if strings.TrimSpace(subject) == "" || strings.TrimSpace(subject) != session.Subject {
-		return Session{}, errors.New("browserauth: refreshed token subject changed")
+		return Session{}, fmt.Errorf("%w: refreshed token subject changed", ErrInvalidSession)
 	}
 	session.Claims = claims
 	return session, nil

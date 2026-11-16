@@ -6,24 +6,33 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
 	"github.com/adiom-data/framework/auth"
 	"github.com/adiom-data/framework/auth/tokenissuer"
+	"golang.org/x/oauth2"
 )
 
+// ErrInvalidSession marks a missing or unusable session, including rejected
+// refresh credentials. Custom stores and refreshers may wrap this error to
+// require a new login. Preserve operational errors instead, or wrap
+// auth.ErrUnavailable when a dependency is temporarily unavailable.
+var ErrInvalidSession = errors.New("browserauth: invalid session")
+
 var (
-	errMissingSession = errors.New("browserauth: missing session")
-	errInvalidSession = errors.New("browserauth: invalid session")
-	errExpiredSession = errors.New("browserauth: expired session")
-	errRevokedSession = errors.New("browserauth: revoked session")
+	errMissingSession = fmt.Errorf("%w: missing session", ErrInvalidSession)
+	errExpiredSession = fmt.Errorf("%w: expired session", ErrInvalidSession)
+	errRevokedSession = fmt.Errorf("%w: revoked session", ErrInvalidSession)
 	errNotConfigured  = errors.New("browserauth: not configured")
 )
 
 const DefaultRefreshLeeway = time.Minute
 
 // SessionRefresher refreshes upstream browser auth state before token minting.
+// Return or wrap ErrInvalidSession for rejected credentials. Preserve other
+// failures, or wrap auth.ErrUnavailable to mark a temporary dependency failure.
 type SessionRefresher interface {
 	RefreshSession(context.Context, Session) (Session, error)
 }
@@ -55,7 +64,7 @@ func (e TokenEndpoint) Handler() http.Handler {
 		}
 		token, err := e.Mint(r)
 		if err != nil {
-			status := statusCode(err)
+			status := TokenErrorStatus(err)
 			if status >= 500 {
 				slog.ErrorContext(r.Context(), "browserauth: token issuance failed", "error", err)
 			}
@@ -67,7 +76,9 @@ func (e TokenEndpoint) Handler() http.Handler {
 	})
 }
 
-// Mint loads the browser session and mints a final API token.
+// Mint loads the browser session and mints a final API token. TokenErrorStatus
+// classifies returned errors for custom HTTP handlers; causes remain available
+// through errors.Is/errors.As. Do not return error text directly to clients.
 func (e TokenEndpoint) Mint(r *http.Request) (string, error) {
 	if e.Store == nil {
 		return "", errors.Join(errNotConfigured, errors.New("session store is not configured"))
@@ -84,7 +95,7 @@ func (e TokenEndpoint) Mint(r *http.Request) (string, error) {
 	}
 	session, err := e.Store.Get(r.Context(), sessionID)
 	if err != nil {
-		return "", fmt.Errorf("%w: %w", errInvalidSession, err)
+		return "", fmt.Errorf("browserauth: load session: %w", err)
 	}
 	now := e.now()
 	if !session.RevokedAt.IsZero() {
@@ -96,7 +107,7 @@ func (e TokenEndpoint) Mint(r *http.Request) (string, error) {
 	if e.shouldRefresh(session, now) {
 		session, err = e.refreshSession(r.Context(), session)
 		if err != nil {
-			return "", fmt.Errorf("%w: %w", errInvalidSession, err)
+			return "", fmt.Errorf("browserauth: refresh session: %w", err)
 		}
 	}
 	external, err := session.ExternalIdentity()
@@ -111,15 +122,41 @@ func (e TokenEndpoint) Mint(r *http.Request) (string, error) {
 	return token, err
 }
 
-func statusCode(err error) int {
+// TokenErrorStatus maps errors from TokenEndpoint.Mint to HTTP status codes.
+// It returns 200 for nil, 401 for missing or invalid sessions, 403 for explicit
+// permission denials, 503 for temporary dependency failures, and 500 for other
+// errors. Temporary failures take precedence over session-rejection markers.
+// The status does not expose error details or establish whether an arbitrary
+// server error is safe to retry. Callers must use their own generic messages.
+func TokenErrorStatus(err error) int {
 	switch {
+	case err == nil:
+		return http.StatusOK
 	case errors.Is(err, auth.ErrUnavailable), errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		return http.StatusServiceUnavailable
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) {
+		return http.StatusServiceUnavailable
+	}
+	var providerErr *oauth2.RetrieveError
+	if errors.As(err, &providerErr) {
+		if providerErr.Response != nil {
+			status := providerErr.Response.StatusCode
+			if status == http.StatusTooManyRequests || status >= 500 && status <= 599 {
+				return http.StatusServiceUnavailable
+			}
+		}
+		if providerErr.ErrorCode == "temporarily_unavailable" || providerErr.ErrorCode == "server_error" {
+			return http.StatusServiceUnavailable
+		}
+	}
+	switch {
 	case errors.Is(err, errNotConfigured):
 		return http.StatusInternalServerError
 	case errors.Is(err, auth.ErrPermissionDenied), errors.Is(err, tokenissuer.ErrPermissionDenied):
 		return http.StatusForbidden
-	case errors.Is(err, errMissingSession), errors.Is(err, errInvalidSession), errors.Is(err, errRevokedSession), errors.Is(err, errExpiredSession):
+	case errors.Is(err, ErrInvalidSession):
 		return http.StatusUnauthorized
 	default:
 		return http.StatusInternalServerError
@@ -152,17 +189,31 @@ func (e TokenEndpoint) refreshSession(ctx context.Context, session Session) (Ses
 			if !e.shouldRefresh(locked, now) {
 				return locked, nil
 			}
-			return e.Refresher.RefreshSession(ctx, locked)
+			refreshed, err := e.Refresher.RefreshSession(ctx, locked)
+			return refreshed, refreshCredentialError(err)
 		})
 	}
 	session, err := e.Refresher.RefreshSession(ctx, session)
 	if err != nil {
-		return Session{}, err
+		return Session{}, refreshCredentialError(err)
 	}
 	if err := e.Store.Update(ctx, session); err != nil {
 		return Session{}, err
 	}
 	return session, nil
+}
+
+// OAuth invalid_grant rejects the refresh credential, not the application's
+// client configuration. Other provider failures retain their original category.
+func refreshCredentialError(err error) error {
+	if err == nil || errors.Is(err, ErrInvalidSession) {
+		return err
+	}
+	var providerErr *oauth2.RetrieveError
+	if errors.As(err, &providerErr) && providerErr.ErrorCode == "invalid_grant" {
+		return fmt.Errorf("%w: %w", ErrInvalidSession, err)
+	}
+	return err
 }
 
 func (e TokenEndpoint) now() time.Time {

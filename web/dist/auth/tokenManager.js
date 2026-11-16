@@ -7,6 +7,9 @@ export class AuthTokenManager {
     fetch;
     token;
     pendingToken;
+    generation = 0;
+    logoutRequests = 0;
+    redirecting = false;
     constructor(options = {}) {
         this.tokenUrl = options.tokenUrl ?? "/auth/token";
         this.logoutUrl = options.logoutUrl ?? "/auth/logout";
@@ -15,58 +18,108 @@ export class AuthTokenManager {
         this.fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
     }
     async getToken(options = {}) {
+        if (this.logoutRequests > 0 || this.redirecting) {
+            return undefined;
+        }
+        if (options.forceRefresh) {
+            // Refresh the token within the current authentication state. Keep any
+            // in-flight fetch so concurrent refresh callers can share its result.
+            this.token = undefined;
+        }
         if (!options.forceRefresh && this.token && !this.isExpiring(this.token.expiresAtMs)) {
             return this.token.value;
         }
-        if (!options.forceRefresh && this.pendingToken) {
+        if (this.pendingToken) {
             return this.pendingToken;
         }
-        this.pendingToken = this.fetchToken();
+        const pending = this.fetchToken(this.generation);
+        this.pendingToken = pending;
         try {
-            return await this.pendingToken;
+            return await pending;
         }
         finally {
-            this.pendingToken = undefined;
+            if (this.pendingToken === pending) {
+                this.pendingToken = undefined;
+            }
         }
     }
+    // Request retries can use this version to avoid crossing a clear/logout.
+    get authStateVersion() {
+        return this.generation;
+    }
     clear() {
+        this.generation++;
         this.token = undefined;
+        this.pendingToken = undefined;
     }
     async logout() {
+        this.logoutRequests++;
         this.clear();
-        await this.fetch(this.logoutUrl, {
-            credentials: this.credentials,
-            method: "POST",
-        });
+        try {
+            const response = await this.fetch(this.logoutUrl, {
+                credentials: this.credentials,
+                method: "POST",
+                cache: "no-store",
+            });
+            if (!response.ok) {
+                throw new Error("Unable to end auth session.");
+            }
+        }
+        finally {
+            this.clear();
+            this.logoutRequests--;
+        }
     }
     logoutWithRedirect(options = {}) {
         this.clear();
         const location = options.location ?? globalThis.location;
-        location.assign(this.logoutUrl);
+        this.redirecting = true;
+        try {
+            location.assign(this.logoutUrl);
+        }
+        catch (error) {
+            this.redirecting = false;
+            throw error;
+        }
     }
-    async fetchToken() {
-        const response = await this.fetch(this.tokenUrl, {
-            credentials: this.credentials,
-            method: "POST",
-        });
-        if (response.status === 401) {
-            this.clear();
-            return undefined;
+    async fetchToken(generation) {
+        try {
+            const response = await this.fetch(this.tokenUrl, {
+                credentials: this.credentials,
+                method: "POST",
+                cache: "no-store",
+            });
+            if (generation !== this.generation) {
+                return undefined;
+            }
+            if (response.status === 401) {
+                this.clear();
+                return undefined;
+            }
+            if (!response.ok) {
+                throw new Error("Unable to refresh auth session.");
+            }
+            const body = (await response.json());
+            if (generation !== this.generation) {
+                return undefined;
+            }
+            if (!body.access_token) {
+                this.clear();
+                return undefined;
+            }
+            this.token = {
+                value: body.access_token,
+                expiresAtMs: tokenExpiresAtMs(body.access_token),
+            };
+            return this.token.value;
         }
-        if (!response.ok) {
+        catch (error) {
+            if (generation !== this.generation) {
+                return undefined;
+            }
             this.clear();
-            throw new Error("Unable to refresh auth session.");
+            throw error;
         }
-        const body = (await response.json());
-        if (!body.access_token) {
-            this.clear();
-            return undefined;
-        }
-        this.token = {
-            value: body.access_token,
-            expiresAtMs: tokenExpiresAtMs(body.access_token),
-        };
-        return this.token.value;
     }
     isExpiring(expiresAtMs) {
         return Date.now() + this.refreshSkewMs >= expiresAtMs;

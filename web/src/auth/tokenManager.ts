@@ -34,6 +34,9 @@ export class AuthTokenManager {
   private readonly fetch: Fetch;
   private token?: { value: string; expiresAtMs: number };
   private pendingToken?: Promise<string | undefined>;
+  private generation = 0;
+  private logoutRequests = 0;
+  private redirecting = false;
 
   constructor(options: AuthTokenManagerOptions = {}) {
     this.tokenUrl = options.tokenUrl ?? "/auth/token";
@@ -44,64 +47,112 @@ export class AuthTokenManager {
   }
 
   async getToken(options: TokenOptions = {}): Promise<string | undefined> {
+    if (this.logoutRequests > 0 || this.redirecting) {
+      return undefined;
+    }
+    if (options.forceRefresh) {
+      // Refresh the token within the current authentication state. Keep any
+      // in-flight fetch so concurrent refresh callers can share its result.
+      this.token = undefined;
+    }
     if (!options.forceRefresh && this.token && !this.isExpiring(this.token.expiresAtMs)) {
       return this.token.value;
     }
-    if (!options.forceRefresh && this.pendingToken) {
+    if (this.pendingToken) {
       return this.pendingToken;
     }
 
-    this.pendingToken = this.fetchToken();
+    const pending = this.fetchToken(this.generation);
+    this.pendingToken = pending;
     try {
-      return await this.pendingToken;
+      return await pending;
     } finally {
-      this.pendingToken = undefined;
+      if (this.pendingToken === pending) {
+        this.pendingToken = undefined;
+      }
     }
   }
 
+  // Request retries can use this version to avoid crossing a clear/logout.
+  get authStateVersion(): number {
+    return this.generation;
+  }
+
   clear() {
+    this.generation++;
     this.token = undefined;
+    this.pendingToken = undefined;
   }
 
   async logout() {
+    this.logoutRequests++;
     this.clear();
-    await this.fetch(this.logoutUrl, {
-      credentials: this.credentials,
-      method: "POST",
-    });
+    try {
+      const response = await this.fetch(this.logoutUrl, {
+        credentials: this.credentials,
+        method: "POST",
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        throw new Error("Unable to end auth session.");
+      }
+    } finally {
+      this.clear();
+      this.logoutRequests--;
+    }
   }
 
   logoutWithRedirect(options: LogoutRedirectOptions = {}) {
     this.clear();
     const location = options.location ?? globalThis.location;
-    location.assign(this.logoutUrl);
+    this.redirecting = true;
+    try {
+      location.assign(this.logoutUrl);
+    } catch (error) {
+      this.redirecting = false;
+      throw error;
+    }
   }
 
-  private async fetchToken(): Promise<string | undefined> {
-    const response = await this.fetch(this.tokenUrl, {
-      credentials: this.credentials,
-      method: "POST",
-    });
-    if (response.status === 401) {
-      this.clear();
-      return undefined;
-    }
-    if (!response.ok) {
-      this.clear();
-      throw new Error("Unable to refresh auth session.");
-    }
+  private async fetchToken(generation: number): Promise<string | undefined> {
+    try {
+      const response = await this.fetch(this.tokenUrl, {
+        credentials: this.credentials,
+        method: "POST",
+        cache: "no-store",
+      });
+      if (generation !== this.generation) {
+        return undefined;
+      }
+      if (response.status === 401) {
+        this.clear();
+        return undefined;
+      }
+      if (!response.ok) {
+        throw new Error("Unable to refresh auth session.");
+      }
 
-    const body = (await response.json()) as TokenResponse;
-    if (!body.access_token) {
-      this.clear();
-      return undefined;
-    }
+      const body = (await response.json()) as TokenResponse;
+      if (generation !== this.generation) {
+        return undefined;
+      }
+      if (!body.access_token) {
+        this.clear();
+        return undefined;
+      }
 
-    this.token = {
-      value: body.access_token,
-      expiresAtMs: tokenExpiresAtMs(body.access_token),
-    };
-    return this.token.value;
+      this.token = {
+        value: body.access_token,
+        expiresAtMs: tokenExpiresAtMs(body.access_token),
+      };
+      return this.token.value;
+    } catch (error) {
+      if (generation !== this.generation) {
+        return undefined;
+      }
+      this.clear();
+      throw error;
+    }
   }
 
   private isExpiring(expiresAtMs: number): boolean {

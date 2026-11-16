@@ -287,7 +287,11 @@ authenticator := tokenissuer.NewBearerAuthenticator(
 
 `BearerAuthenticator.Authenticate` owns extraction, verification, generic policy,
 and context storage. `ConnectAuth` only adapts that result to Connect headers and
-Connect error codes. Handlers can read the generic claims or identity:
+Connect error codes. Client-facing errors use generic messages and omit error
+details and metadata supplied by policies or verifiers. The original cause
+remains available to server code through `errors.Is`/`errors.As`. Return or wrap
+`auth.ErrPermissionDenied` for a policy rejection and `auth.ErrUnavailable` for
+a temporary dependency failure. Handlers can read the generic claims or identity:
 
 ```go
 claims, ok := tokenissuer.ClaimsFromContext(ctx)
@@ -299,6 +303,15 @@ Apps that need their own representation can read the mapped value:
 ```go
 user, ok := tokenissuer.AuthValueFromContext[*samplev1.User](ctx)
 ```
+
+Custom application claims may be added through `Identity.Claims`. Protected
+fields (`iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, `jti`, `scope`, `scopes`, and
+`attributes`) are managed by the framework. Set identity values through
+`Identity.Subject`, `Scopes`, `Aud`, and `Attributes`, and token defaults through
+the issuer configuration.
+Custom names that the JSON decoder would treat as aliases of protected fields,
+including case variants and Unicode case-fold equivalents, are rejected during
+minting and verification. Ordinary new application claim names remain allowed.
 
 ## Browser Auth
 
@@ -332,8 +345,12 @@ handler := browserAuth.Handler(browserauth.HandlerConfig{
 mux.Handle("/auth/", http.StripPrefix("/auth", handler))
 ```
 
-`/auth/logout` always revokes the local browser session and clears the local
-session cookie. If the user should also be signed out of the upstream OIDC
+`/auth/logout` revokes the local browser session before clearing the local
+session cookie. A revocation failure returns a generic HTTP 500 and retains the
+cookie so the browser can retry; it does not redirect or report success. Server
+logs contain the failure details. Token and logout responses include
+`Cache-Control: no-store` and `Pragma: no-cache`.
+If the user should also be signed out of the upstream OIDC
 provider, configure a provider logout redirect. For request-hosted apps, this
 uses the provider `end_session_endpoint` when it is advertised and sends the
 browser back to the public app URL afterward:
@@ -402,8 +419,10 @@ mux.Handle("/callback", browserauth.ProxyCallbackForwarder(
 ```
 
 The forwarder does not exchange codes or verify user identity. It extracts the
-app callback URL from state, optionally applies the configured return URL
-constraint, and redirects with the original provider callback query.
+app callback URL from state, validates it against the required `ReturnToValidator`,
+and redirects with the original provider callback query. The validator must
+restrict destinations to trusted app callback URLs; state is an unsigned routing
+hint. Without a validator, the forwarder returns HTTP 500 without redirecting.
 
 When `SessionCookie.Path` is empty, the composed handler defaults it to
 `BasePath`, so the browser session cookie is scoped to the auth mount.
@@ -427,6 +446,12 @@ The callback should save a `browserauth.Session` behind an opaque session cookie
 The token endpoint loads that session, turns it back into `auth.ExternalIdentity`,
 runs the same app authorizer, and mints the final API JWT. The SPA uses that
 final JWT as its `Authorization: Bearer ...` token for API calls.
+
+The browser token endpoint returns generic errors: HTTP 401 for invalid or
+missing sessions, HTTP 403 for explicit policy rejections, HTTP 503 for explicitly
+unavailable dependencies or canceled/timed-out operations, and HTTP 500 for
+unclassified authorization or issuance failures. `TokenEndpoint.Mint` retains
+original causes for server-side inspection; HTTP responses omit their details.
 
 The browser session stores upstream auth state, not final app scopes. Final
 scopes should be resolved each time a new API token is minted. `SessionTTL` is

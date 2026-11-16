@@ -38,7 +38,7 @@ cd web && npm pack
 ```json
 {
   "dependencies": {
-    "@adiom-data/framework-web": "file:../framework-web-0.0.0.tgz"
+    "@adiom-data/framework-web": "file:../adiom-data-framework-web-0.0.3.tgz"
   }
 }
 ```
@@ -47,7 +47,11 @@ cd web && npm pack
 
 `AuthTokenManager` fetches short-lived app JWTs from `/auth/token`, caches them
 until they are close to expiration, and clears local state on unauthorized
-responses.
+responses. `clear()` also invalidates pending token results. A response from an
+older authentication state cannot replace or clear a newer token.
+Forced refreshes bypass the cached token and share any pending token fetch.
+`authStateVersion` changes when authentication is cleared, allowing request
+retries to stay within the authentication state in which they started.
 
 ```ts
 import { AuthTokenManager, createAuthInterceptor } from "@adiom-data/framework-web/auth";
@@ -61,6 +65,9 @@ const authInterceptor = createAuthInterceptor(tokenManager);
 ```
 
 Use the interceptor with Connect clients that should send the app bearer token.
+Concurrent authentication retries share a refresh. If another request already
+refreshed the rejected token, the interceptor reuses it. Requests are not retried
+across a `clear()` or logout.
 
 ```ts
 const transport = createConnectTransport({
@@ -73,7 +80,10 @@ The default `credentials` mode is `same-origin`, matching the recommended
 same-host `/auth` mount. For cross-origin auth hosts, pass `credentials:
 "include"` and configure CORS at the gateway or HTTP layer.
 
-For local-only logout, call `await tokenManager.logout()`. If `/auth/logout`
+For local-only logout, call `await tokenManager.logout()` and handle rejection
+when the server cannot complete logout. Token retrieval is suspended while
+logout is in progress, and pending token responses are discarded. Requests to
+the token and logout endpoints use `cache: "no-store"`. If `/auth/logout`
 redirects through the upstream OIDC provider, use a top-level browser
 navigation instead:
 

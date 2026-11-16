@@ -16,11 +16,14 @@ import (
 	"time"
 
 	"github.com/adiom-data/framework/auth"
+	"github.com/adiom-data/framework/internal/jwtclaims"
 	"github.com/go-jose/go-jose/v4"
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
 )
 
 const DefaultTTL = 10 * time.Minute
+
+var reservedClaimNames = []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti", "scope", "scopes", "attributes"}
 
 // Config configures a standard auth token issuer.
 type Config struct {
@@ -101,6 +104,9 @@ func (c Claims) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON stores custom top-level claims while decoding known claims.
 func (c *Claims) UnmarshalJSON(data []byte) error {
+	if err := jwtclaims.ValidateNames(data, reservedClaimNames); err != nil {
+		return err
+	}
 	type frameworkClaims struct {
 		Scope      string            `json:"scope,omitempty"`
 		Scopes     []string          `json:"scopes,omitempty"`
@@ -570,10 +576,5 @@ func validateCustomClaims(claims map[string]any) error {
 }
 
 func isReservedClaim(name string) bool {
-	switch name {
-	case "iss", "sub", "aud", "exp", "nbf", "iat", "jti", "scope", "scopes", "attributes":
-		return true
-	default:
-		return false
-	}
+	return jwtclaims.Reserved(name, reservedClaimNames)
 }

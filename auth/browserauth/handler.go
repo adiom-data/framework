@@ -2,6 +2,7 @@ package browserauth
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -159,20 +160,30 @@ type LogoutHandler struct {
 // Handler returns an HTTP logout handler.
 func (h LogoutHandler) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
 		if r.Method != http.MethodGet && r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		if h.Store != nil {
-			if sessionID, err := h.Cookie.Get(r); err == nil {
-				_ = h.Store.Revoke(r.Context(), sessionID)
+		if sessionID, err := h.Cookie.Get(r); err == nil {
+			if h.Store == nil {
+				http.Error(w, "Unable to sign out.", http.StatusInternalServerError)
+				return
+			}
+			if err := h.Store.Revoke(r.Context(), sessionID); err != nil {
+				slog.ErrorContext(r.Context(), "browserauth: session revocation failed", "error", err)
+				// Keep the cookie so the browser can retry revocation.
+				http.Error(w, "Unable to sign out.", http.StatusInternalServerError)
+				return
 			}
 		}
 		h.Cookie.Clear(w)
 		if h.RedirectFunc != nil {
 			redirect, err := h.RedirectFunc(r)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				slog.ErrorContext(r.Context(), "browserauth: logout redirect failed", "error", err)
+				http.Error(w, "Unable to finish sign out.", http.StatusInternalServerError)
 				return
 			}
 			if strings.TrimSpace(redirect) != "" {

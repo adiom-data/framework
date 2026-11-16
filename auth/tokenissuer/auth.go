@@ -128,7 +128,7 @@ func (a BearerAuthenticator) Authenticate(ctx context.Context, authorization str
 	}
 	claims, err := a.verifier.Verify(ctx, token)
 	if err != nil {
-		return ctx, fmt.Errorf("%w: %v", ErrInvalidBearerToken, err)
+		return ctx, fmt.Errorf("%w: %w", ErrInvalidBearerToken, err)
 	}
 	for _, policy := range a.cfg.policies {
 		if err := policy(ctx, claims); err != nil {

@@ -20,8 +20,12 @@ export declare class AuthTokenManager {
     private readonly fetch;
     private token?;
     private pendingToken?;
+    private generation;
+    private logoutRequests;
+    private redirecting;
     constructor(options?: AuthTokenManagerOptions);
     getToken(options?: TokenOptions): Promise<string | undefined>;
+    get authStateVersion(): number;
     clear(): void;
     logout(): Promise<void>;
     logoutWithRedirect(options?: LogoutRedirectOptions): void;

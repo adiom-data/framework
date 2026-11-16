@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"connectrpc.com/connect"
+	"github.com/adiom-data/framework/auth"
 )
 
 // ConnectAuth returns a Connect interceptor that runs authenticator and maps
@@ -46,15 +47,39 @@ func connectAuthError(err error) error {
 		return nil
 	}
 	var connectErr *connect.Error
-	if errors.As(err, &connectErr) {
-		return err
-	}
+	code := connect.CodeInternal
 	switch {
+	case errors.Is(err, auth.ErrUnavailable):
+		code = connect.CodeUnavailable
+	case errors.Is(err, context.DeadlineExceeded):
+		code = connect.CodeDeadlineExceeded
+	case errors.Is(err, context.Canceled):
+		code = connect.CodeCanceled
+	case errors.As(err, &connectErr):
+		code = connectErr.Code()
 	case errors.Is(err, ErrMissingBearerToken), errors.Is(err, ErrInvalidBearerToken):
-		return connect.NewError(connect.CodeUnauthenticated, err)
-	case errors.Is(err, ErrPermissionDenied):
-		return connect.NewError(connect.CodePermissionDenied, err)
-	default:
-		return connect.NewError(connect.CodeInternal, err)
+		code = connect.CodeUnauthenticated
+	case errors.Is(err, ErrPermissionDenied), errors.Is(err, auth.ErrPermissionDenied):
+		code = connect.CodePermissionDenied
 	}
+	message := "Unable to authenticate request."
+	switch code {
+	case connect.CodeUnauthenticated:
+		message = "Authentication is required."
+	case connect.CodePermissionDenied:
+		message = "Request is not permitted."
+	case connect.CodeUnavailable, connect.CodeDeadlineExceeded, connect.CodeCanceled, connect.CodeResourceExhausted:
+		message = "Authentication is temporarily unavailable."
+	}
+	return connect.NewError(code, &safeAuthError{message: message, cause: err})
 }
+
+// Retain causes for server-side inspection without copying their messages,
+// Connect metadata, or error details into client-facing responses.
+type safeAuthError struct {
+	message string
+	cause   error
+}
+
+func (e *safeAuthError) Error() string { return e.message }
+func (e *safeAuthError) Unwrap() error { return e.cause }

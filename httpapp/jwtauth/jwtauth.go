@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/adiom-data/framework/httpapp/middleware"
+	"github.com/adiom-data/framework/internal/jwtclaims"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-jose/go-jose/v4/jwt"
 )
@@ -47,6 +48,9 @@ type Claims struct {
 // UnmarshalJSON stores every claim in Raw, preserving numbers as json.Number,
 // while decoding registered claims.
 func (c *Claims) UnmarshalJSON(data []byte) error {
+	if err := jwtclaims.ValidateNames(data, jwtclaims.Registered); err != nil {
+		return err
+	}
 	type registeredClaims jwt.Claims
 	if err := json.Unmarshal(data, (*registeredClaims)(&c.Claims)); err != nil {
 		return err

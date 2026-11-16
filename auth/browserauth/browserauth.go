@@ -228,6 +228,9 @@ type CookieStateStore struct {
 // provider callbacks from a stable proxy URL back to the app callback URL
 // encoded in OAuth state.
 type ProxyCallbackForwarderConfig struct {
+	// ReturnToValidator is required and must restrict destinations to trusted
+	// app callback URLs. Proxy state is an unsigned routing hint, not proof
+	// that a destination is trusted. A nil validator fails closed.
 	ReturnToValidator func(string) bool
 }
 
@@ -389,12 +392,12 @@ func (b *BrowserAuth) loginHandler(proxyReturnURL RedirectURLResolver) http.Hand
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		oauth2Config, err := b.oauth2Config(r)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, "Unable to start login.", http.StatusInternalServerError)
 			return
 		}
 		session, err := b.newLoginSession(w, r, proxyReturnURL)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, "Unable to start login.", http.StatusInternalServerError)
 			return
 		}
 		options := append([]oauth2.AuthCodeOption{}, b.authCodeOptions...)
@@ -451,7 +454,7 @@ func (b *BrowserAuth) CallbackHandlerWithConfig(cfg CallbackHandlerConfig) http.
 			if cfg.InvalidStateHandler != nil {
 				cfg.InvalidStateHandler(w, r, err)
 			} else {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				http.Error(w, "Invalid login state.", http.StatusBadRequest)
 			}
 			return
 		}
@@ -461,7 +464,7 @@ func (b *BrowserAuth) CallbackHandlerWithConfig(cfg CallbackHandlerConfig) http.
 		}
 		oauth2Config, err := b.oauth2Config(r)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, "Unable to complete login.", http.StatusInternalServerError)
 			return
 		}
 		ctx := b.clientContext(r.Context())
@@ -494,7 +497,7 @@ func RedirectInvalidState(location string) InvalidStateHandler {
 	return func(w http.ResponseWriter, r *http.Request, err error) {
 		redirect := strings.TrimSpace(location)
 		if redirect == "" {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, "Invalid login state.", http.StatusBadRequest)
 			return
 		}
 		http.Redirect(w, r, redirect, http.StatusFound)
@@ -513,18 +516,22 @@ func PublicRedirectURL(callbackPath string) RedirectURLResolver {
 // provider callback query to that URL.
 func ProxyCallbackForwarder(cfg ProxyCallbackForwarderConfig) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		returnTo, err := ProxyStateReturnTo(r.URL.Query().Get("state"))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if cfg.ReturnToValidator == nil {
+			http.Error(w, "Callback destination policy is not configured.", http.StatusInternalServerError)
 			return
 		}
-		if cfg.ReturnToValidator != nil && !cfg.ReturnToValidator(returnTo) {
-			http.Error(w, "browserauth: proxy return URL is not allowed", http.StatusBadRequest)
+		returnTo, err := ProxyStateReturnTo(r.URL.Query().Get("state"))
+		if err != nil {
+			http.Error(w, "Invalid callback destination.", http.StatusBadRequest)
 			return
 		}
 		redirect, err := validateRedirectURL(returnTo)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, "Invalid callback destination.", http.StatusBadRequest)
+			return
+		}
+		if !cfg.ReturnToValidator(redirect) {
+			http.Error(w, "Callback destination is not allowed.", http.StatusBadRequest)
 			return
 		}
 		redirect = appendRawQuery(redirect, r.URL.RawQuery)

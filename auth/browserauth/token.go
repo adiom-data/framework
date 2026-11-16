@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -45,13 +47,19 @@ type TokenResponse struct {
 // Handler returns an HTTP handler suitable for /auth/token.
 func (e TokenEndpoint) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
 		if r.Method != http.MethodGet && r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		token, err := e.Mint(r)
 		if err != nil {
-			http.Error(w, err.Error(), statusCode(err))
+			status := statusCode(err)
+			if status >= 500 {
+				slog.ErrorContext(r.Context(), "browserauth: token issuance failed", "error", err)
+			}
+			http.Error(w, tokenErrorMessage(status), status)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -76,7 +84,7 @@ func (e TokenEndpoint) Mint(r *http.Request) (string, error) {
 	}
 	session, err := e.Store.Get(r.Context(), sessionID)
 	if err != nil {
-		return "", errInvalidSession
+		return "", fmt.Errorf("%w: %w", errInvalidSession, err)
 	}
 	now := e.now()
 	if !session.RevokedAt.IsZero() {
@@ -88,7 +96,7 @@ func (e TokenEndpoint) Mint(r *http.Request) (string, error) {
 	if e.shouldRefresh(session, now) {
 		session, err = e.refreshSession(r.Context(), session)
 		if err != nil {
-			return "", errInvalidSession
+			return "", fmt.Errorf("%w: %w", errInvalidSession, err)
 		}
 	}
 	external, err := session.ExternalIdentity()
@@ -104,10 +112,31 @@ func (e TokenEndpoint) Mint(r *http.Request) (string, error) {
 }
 
 func statusCode(err error) int {
-	if errors.Is(err, errNotConfigured) {
+	switch {
+	case errors.Is(err, auth.ErrUnavailable), errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return http.StatusServiceUnavailable
+	case errors.Is(err, errNotConfigured):
+		return http.StatusInternalServerError
+	case errors.Is(err, auth.ErrPermissionDenied), errors.Is(err, tokenissuer.ErrPermissionDenied):
+		return http.StatusForbidden
+	case errors.Is(err, errMissingSession), errors.Is(err, errInvalidSession), errors.Is(err, errRevokedSession), errors.Is(err, errExpiredSession):
+		return http.StatusUnauthorized
+	default:
 		return http.StatusInternalServerError
 	}
-	return http.StatusUnauthorized
+}
+
+func tokenErrorMessage(status int) string {
+	switch status {
+	case http.StatusUnauthorized:
+		return "Authentication is required."
+	case http.StatusForbidden:
+		return "Token issuance is not permitted."
+	case http.StatusServiceUnavailable:
+		return "Authentication is temporarily unavailable."
+	default:
+		return "Unable to issue access token."
+	}
 }
 
 func (e TokenEndpoint) refreshSession(ctx context.Context, session Session) (Session, error) {

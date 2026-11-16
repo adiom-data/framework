@@ -1,6 +1,6 @@
 {
   "name": "@adiom-data/framework-web",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "type": "module",
   "packageManager": "pnpm@10.22.0",
   "publishConfig": {
@@ -20,7 +20,8 @@
     "build": "tsc -p tsconfig.json",
     "prepack": "npm run build",
     "prepare": "npm run build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test test/*.test.js"
   },
   "dependencies": {
     "@connectrpc/connect": "2.1.1",

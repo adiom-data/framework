@@ -23,6 +23,10 @@ import (
 
 const DefaultTTL = 10 * time.Minute
 
+// ErrExpiryLimitReached means the requested expiry limit is too soon to mint
+// a token with a future JWT expiry.
+var ErrExpiryLimitReached = errors.New("tokenissuer: expiry limit reached")
+
 var reservedClaimNames = []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti", "scope", "scopes", "attributes"}
 
 // Config configures a standard auth token issuer.
@@ -230,6 +234,12 @@ func DecodePrivateKey(value string) (ed25519.PrivateKey, error) {
 
 // Mint signs a short-lived access token for identity.
 func (i *Issuer) Mint(ctx context.Context, identity auth.Identity) (string, time.Time, error) {
+	return i.MintWithExpiryLimit(ctx, identity, time.Time{})
+}
+
+// MintWithExpiryLimit signs a token that expires at the earlier of the
+// issuer's normal expiry and limit. A zero limit uses the normal expiry.
+func (i *Issuer) MintWithExpiryLimit(ctx context.Context, identity auth.Identity, limit time.Time) (string, time.Time, error) {
 	_ = ctx
 	if i == nil {
 		return "", time.Time{}, errors.New("tokenissuer: issuer is not configured")
@@ -239,6 +249,15 @@ func (i *Issuer) Mint(ctx context.Context, identity auth.Identity) (string, time
 	}
 	now := i.now()
 	expiresAt := now.Add(i.ttl)
+	if !limit.IsZero() {
+		// JWT expiries are encoded at whole-second precision.
+		if limit.Unix() <= now.Unix() {
+			return "", time.Time{}, ErrExpiryLimitReached
+		}
+		if limit.Before(expiresAt) {
+			expiresAt = limit
+		}
+	}
 	scopes := auth.NormalizeScopes(identity.Scopes)
 	claims := Claims{
 		Scope:      strings.Join(scopes, " "),

@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -17,6 +18,62 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
 )
+
+func TestIssuerMintWithExpiryLimit(t *testing.T) {
+	t.Parallel()
+
+	key, err := GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer, err := New(Config{
+		Issuer:      "https://auth.example.com",
+		ActiveKeyID: "test-key",
+		Keys:        []SigningKey{{KeyID: "test-key", PrivateKey: key}},
+		TTL:         time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_800_000_000, 0)
+	issuer.now = func() time.Time { return now }
+	identity := auth.Identity{Subject: "user-1"}
+	for _, tt := range []struct {
+		name  string
+		limit time.Time
+		want  time.Time
+	}{
+		{"earlier than TTL", now.Add(5 * time.Second), now.Add(5 * time.Second)},
+		{"later than TTL", now.Add(2 * time.Minute), now.Add(time.Minute)},
+		{"no limit", time.Time{}, now.Add(time.Minute)},
+		{"at the limit", now, time.Time{}},
+		{"after the limit", now.Add(-time.Second), time.Time{}},
+		{"limit within current JWT second", now.Add(time.Millisecond), time.Time{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			token, expiresAt, err := issuer.MintWithExpiryLimit(context.Background(), identity, tt.limit)
+			if tt.want.IsZero() {
+				if !errors.Is(err, ErrExpiryLimitReached) || token != "" || !expiresAt.IsZero() {
+					t.Fatalf("expiry=%s error=%v want no token and ErrExpiryLimitReached", expiresAt, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !expiresAt.Equal(tt.want) {
+				t.Fatalf("expiry=%s want %s", expiresAt, tt.want)
+			}
+			claims, err := issuer.Verify(token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := claims.Expiry.Time(); !got.Equal(tt.want) {
+				t.Fatalf("JWT expiry=%s want %s", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestIssuerIdentityAudienceOverride(t *testing.T) {
 	t.Parallel()

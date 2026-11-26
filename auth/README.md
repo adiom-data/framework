@@ -470,6 +470,14 @@ if err != nil {
 // Send token in the application's response format.
 ```
 
+Call `TokenEndpoint.ResolveSession(r)` to load and validate a browser session,
+refreshing upstream credentials as needed. The returned `Session` gives
+handlers direct access to timestamps, claims, and application metadata. Keep
+it server-side because it can contain credentials. Within the same request,
+pass the unmodified session to `TokenEndpoint.MintFromSession(r.Context(), session)`
+to run the app authorizer and sign an API token. `TokenErrorStatus` applies to
+both methods.
+
 Custom session stores and refreshers should return or wrap
 `browserauth.ErrInvalidSession` for unknown sessions or rejected credentials.
 Preserve operational errors; wrap `auth.ErrUnavailable` when a dependency is
@@ -482,9 +490,12 @@ HTTP responses omit their details. The built-in handler does not clear the
 browser cookie or revoke the session on server failures.
 
 The browser session stores upstream auth state, not final app scopes. Final
-scopes should be resolved each time a new API token is minted. `SessionTTL` is
-the maximum browser-auth session lifetime; once it expires, `/auth/token`
-returns unauthorized and the user must log in again.
+scopes should be resolved each time a new API token is minted. `SessionTTL` sets
+the browser session lifetime at login. Upstream refresh leaves that lifetime
+unchanged. API tokens minted from a browser session expire by the session's
+expiry. Once the session expires, issuance returns unauthorized and the app
+must start a new login flow. Token verifiers still apply their clock-skew
+allowance when checking JWT expiry.
 
 For silent refresh, configure `browserauth.TokenEndpoint.Refresher` with the
 `BrowserAuth` instance. The endpoint refreshes upstream OIDC state from the

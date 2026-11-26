@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,6 +32,7 @@ func TestTokenEndpointMintsFromSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	expiresAt := time.Now().Truncate(time.Second).Add(2 * time.Minute)
 	store := memorySessionStore{
 		"sess_1": {
 			ID:           "sess_1",
@@ -38,7 +40,7 @@ func TestTokenEndpointMintsFromSession(t *testing.T) {
 			Subject:      "upstream-1",
 			RefreshToken: "refresh",
 			Claims:       map[string]any{"email": "user@example.com"},
-			ExpiresAt:    time.Now().Add(time.Hour),
+			ExpiresAt:    expiresAt,
 		},
 	}
 	endpoint := TokenEndpoint{
@@ -66,9 +68,12 @@ func TestTokenEndpointMintsFromSession(t *testing.T) {
 	if claims.Subject != "user-1" {
 		t.Fatalf("subject=%q want user-1", claims.Subject)
 	}
+	if got := claims.Expiry.Time(); !got.Equal(expiresAt) {
+		t.Fatalf("JWT expiry=%s want %s", got, expiresAt)
+	}
 }
 
-func TestTokenEndpointRefreshesSession(t *testing.T) {
+func TestTokenEndpointResolveSessionAndMint(t *testing.T) {
 	t.Parallel()
 
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
@@ -83,6 +88,10 @@ func TestTokenEndpointRefreshesSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	now := time.Now().Truncate(time.Second)
+	createdAt := now.Add(-time.Hour)
+	expiresAt := now.Add(2 * time.Minute)
+	upstreamExpiresAt := now.Add(10 * time.Minute)
 	store := memorySessionStore{
 		"sess_1": {
 			ID:                "sess_1",
@@ -91,11 +100,13 @@ func TestTokenEndpointRefreshesSession(t *testing.T) {
 			RefreshToken:      "refresh-1",
 			Claims:            map[string]any{"email": "old@example.com"},
 			Metadata:          map[string]string{"connection_id": "trusted"},
-			ExpiresAt:         time.Now().Add(time.Hour),
-			UpstreamExpiresAt: time.Now().Add(30 * time.Second),
+			ExpiresAt:         expiresAt,
+			UpstreamExpiresAt: now.Add(30 * time.Second),
+			CreatedAt:         createdAt,
+			UpdatedAt:         createdAt,
 		},
 	}
-	endpoint := TokenEndpoint{
+	resolver := TokenEndpoint{
 		Store: store,
 		Refresher: refresherFunc(func(_ context.Context, session Session) (Session, error) {
 			if session.Metadata["connection_id"] != "trusted" {
@@ -103,8 +114,12 @@ func TestTokenEndpointRefreshesSession(t *testing.T) {
 			}
 			session.RefreshToken = "refresh-2"
 			session.Claims = map[string]any{"email": "new@example.com", "metadata": map[string]any{"connection_id": "idp-value"}}
+			session.UpdatedAt = now
+			session.UpstreamExpiresAt = upstreamExpiresAt
 			return session, nil
 		}),
+	}
+	minter := TokenEndpoint{
 		Authorizer: auth.AuthorizerFunc(func(_ context.Context, external auth.ExternalIdentity) (auth.Identity, error) {
 			if external.Claims["email"] != "new@example.com" {
 				t.Fatalf("email claim=%v want new@example.com", external.Claims["email"])
@@ -120,14 +135,116 @@ func TestTokenEndpointRefreshesSession(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/auth/token", nil)
 	req.AddCookie(&http.Cookie{Name: DefaultSessionCookieName, Value: "sess_1"})
-	if _, err := endpoint.Mint(req); err != nil {
+	session, err := resolver.ResolveSession(req)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if got := store["sess_1"].RefreshToken; got != "refresh-2" {
 		t.Fatalf("refresh token=%q want refresh-2", got)
 	}
+	if got := session.Metadata["connection_id"]; got != "trusted" {
+		t.Fatalf("resolved connection ID=%q want trusted", got)
+	}
+	if got := session.Claims["email"]; got != "new@example.com" {
+		t.Fatalf("resolved email claim=%v want new@example.com", got)
+	}
+	if !session.CreatedAt.Equal(createdAt) || !session.UpdatedAt.Equal(now) ||
+		!session.ExpiresAt.Equal(expiresAt) || !session.UpstreamExpiresAt.Equal(upstreamExpiresAt) {
+		t.Fatal("resolved session lost its timestamps")
+	}
+	if session.ID != "sess_1" || session.RefreshToken != "refresh-2" {
+		t.Fatal("resolved session lost its ID or refresh token")
+	}
+	token, err := minter.MintFromSession(req.Context(), session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := issuer.Verify(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Subject != "user-1" {
+		t.Fatalf("subject=%q want user-1", claims.Subject)
+	}
+	if got := claims.Expiry.Time(); !got.Equal(expiresAt) {
+		t.Fatalf("JWT expiry=%s want %s", got, expiresAt)
+	}
+	if got := session.Metadata["connection_id"]; got != "trusted" {
+		t.Fatalf("authorizer changed resolved connection ID to %q", got)
+	}
 	if store["sess_1"].Metadata["connection_id"] != "trusted" {
 		t.Fatal("authorizer mutated stored metadata")
+	}
+}
+
+func TestTokenEndpointMintFromSessionRejectsUnusableSession(t *testing.T) {
+	t.Parallel()
+
+	endpoint := securityTokenEndpoint(t)
+	endpoint.Authorizer = auth.AuthorizerFunc(func(context.Context, auth.ExternalIdentity) (auth.Identity, error) {
+		t.Fatal("authorizer called for invalid session")
+		return auth.Identity{}, nil
+	})
+	req := securitySessionRequest(http.MethodPost, "/auth/token")
+	if _, err := endpoint.MintFromSession(req.Context(), Session{}); err == nil {
+		t.Fatalf("error=%v want invalid session", err)
+	}
+	now := time.Now()
+	endpoint.Now = func() time.Time { return now }
+	session, err := endpoint.ResolveSession(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked := session
+	revoked.RevokedAt = now
+	if _, err := endpoint.MintFromSession(req.Context(), revoked); !errors.Is(err, errRevokedSession) {
+		t.Fatalf("error=%v want revoked session", err)
+	}
+	now = session.ExpiresAt
+	if _, err := endpoint.MintFromSession(req.Context(), session); !errors.Is(err, errExpiredSession) {
+		t.Fatalf("error=%v want expired session", err)
+	}
+}
+
+func TestTokenEndpointRejectsSessionThatExpiresDuringRefresh(t *testing.T) {
+	t.Parallel()
+
+	endpoint := securityTokenEndpoint(t)
+	now := time.Now()
+	endpoint.Now = func() time.Time { return now }
+	endpoint.Refresher = refresherFunc(func(_ context.Context, session Session) (Session, error) {
+		now = session.ExpiresAt
+		return session, nil
+	})
+	w := httptest.NewRecorder()
+	endpoint.Handler().ServeHTTP(w, securitySessionRequest(http.MethodPost, "/auth/token"))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d want 401", w.Code)
+	}
+}
+
+func TestTokenEndpointRejectsSessionThatExpiresDuringAuthorization(t *testing.T) {
+	t.Parallel()
+
+	endpoint := securityTokenEndpoint(t)
+	expiresAt := endpoint.Store.(memorySessionStore)["session"].ExpiresAt
+	now := expiresAt.Add(-time.Second)
+	endpoint.Now = func() time.Time { return now }
+	endpoint.Authorizer = auth.AuthorizerFunc(func(context.Context, auth.ExternalIdentity) (auth.Identity, error) {
+		now = expiresAt
+		return auth.Identity{Subject: "user"}, nil
+	})
+	req := securitySessionRequest(http.MethodPost, "/auth/token")
+	session, err := endpoint.ResolveSession(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := endpoint.MintFromSession(req.Context(), session); !errors.Is(err, errExpiredSession) {
+		t.Fatalf("MintFromSession error=%v want expired session", err)
+	}
+	now = expiresAt.Add(-time.Second)
+	if _, err := endpoint.Mint(req); !errors.Is(err, errExpiredSession) {
+		t.Fatalf("Mint error=%v want expired session", err)
 	}
 }
 

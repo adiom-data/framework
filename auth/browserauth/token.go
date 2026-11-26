@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"time"
@@ -22,10 +23,11 @@ import (
 var ErrInvalidSession = errors.New("browserauth: invalid session")
 
 var (
-	errMissingSession = fmt.Errorf("%w: missing session", ErrInvalidSession)
-	errExpiredSession = fmt.Errorf("%w: expired session", ErrInvalidSession)
-	errRevokedSession = fmt.Errorf("%w: revoked session", ErrInvalidSession)
-	errNotConfigured  = errors.New("browserauth: not configured")
+	errMissingSession            = fmt.Errorf("%w: missing session", ErrInvalidSession)
+	errExpiredSession            = fmt.Errorf("%w: expired session", ErrInvalidSession)
+	errRevokedSession            = fmt.Errorf("%w: revoked session", ErrInvalidSession)
+	errNotConfigured             = errors.New("browserauth: not configured")
+	errSessionStoreNotConfigured = errors.Join(errNotConfigured, errors.New("session store is not configured"))
 )
 
 const DefaultRefreshLeeway = time.Minute
@@ -76,53 +78,102 @@ func (e TokenEndpoint) Handler() http.Handler {
 	})
 }
 
-// Mint loads the browser session and mints a final API token. TokenErrorStatus
-// classifies returned errors for custom HTTP handlers; causes remain available
-// through errors.Is/errors.As. Do not return error text directly to clients.
+// Mint resolves the browser session, authorizes it, and mints a final API
+// token. Use TokenErrorStatus to classify errors in custom HTTP handlers.
 func (e TokenEndpoint) Mint(r *http.Request) (string, error) {
 	if e.Store == nil {
-		return "", errors.Join(errNotConfigured, errors.New("session store is not configured"))
+		return "", errSessionStoreNotConfigured
 	}
-	if e.Authorizer == nil {
-		return "", errors.Join(errNotConfigured, errors.New("authorizer is not configured"))
+	if err := e.checkMintConfig(); err != nil {
+		return "", err
 	}
-	if e.Issuer == nil {
-		return "", errors.Join(errNotConfigured, errors.New("token issuer is not configured"))
+	session, err := e.ResolveSession(r)
+	if err != nil {
+		return "", err
 	}
+	return e.mintFromSession(r.Context(), session)
+}
+
+// ResolveSession loads the request's browser session, checks its lifetime and
+// revocation state, and refreshes and persists upstream credentials if needed.
+// Keep the returned session server-side and treat its fields as read-only.
+func (e TokenEndpoint) ResolveSession(r *http.Request) (Session, error) {
+	if e.Store == nil {
+		return Session{}, errSessionStoreNotConfigured
+	}
+	ctx := r.Context()
 	sessionID, err := e.Cookie.Get(r)
 	if err != nil {
-		return "", errMissingSession
+		return Session{}, errMissingSession
 	}
-	session, err := e.Store.Get(r.Context(), sessionID)
+	session, err := e.Store.Get(ctx, sessionID)
 	if err != nil {
-		return "", fmt.Errorf("browserauth: load session: %w", err)
+		return Session{}, fmt.Errorf("browserauth: load session: %w", err)
 	}
 	now := e.now()
-	if !session.RevokedAt.IsZero() {
-		return "", errRevokedSession
-	}
-	if !session.ExpiresAt.IsZero() && !now.Before(session.ExpiresAt) {
-		return "", errExpiredSession
+	if err := checkSessionLifetime(session, now); err != nil {
+		return Session{}, err
 	}
 	if e.shouldRefresh(session, now) {
-		session, err = e.refreshSession(r.Context(), session)
+		session, err = e.refreshSession(ctx, session)
 		if err != nil {
-			return "", fmt.Errorf("browserauth: refresh session: %w", err)
+			return Session{}, fmt.Errorf("browserauth: refresh session: %w", err)
 		}
+		if err := checkSessionLifetime(session, e.now()); err != nil {
+			return Session{}, err
+		}
+	}
+	external, err := session.ExternalIdentity()
+	if err != nil {
+		return Session{}, err
+	}
+	session.Metadata = external.Metadata
+	return session, nil
+}
+
+// MintFromSession authorizes the unmodified session returned by ResolveSession
+// for the current request and signs an API token capped at the session expiry.
+func (e TokenEndpoint) MintFromSession(ctx context.Context, session Session) (string, error) {
+	if err := e.checkMintConfig(); err != nil {
+		return "", err
+	}
+	return e.mintFromSession(ctx, session)
+}
+
+func (e TokenEndpoint) checkMintConfig() error {
+	if e.Authorizer == nil {
+		return errors.Join(errNotConfigured, errors.New("authorizer is not configured"))
+	}
+	if e.Issuer == nil {
+		return errors.Join(errNotConfigured, errors.New("token issuer is not configured"))
+	}
+	return nil
+}
+
+func (e TokenEndpoint) mintFromSession(ctx context.Context, session Session) (string, error) {
+	if err := checkSessionLifetime(session, e.now()); err != nil {
+		return "", err
 	}
 	external, err := session.ExternalIdentity()
 	if err != nil {
 		return "", err
 	}
-	identity, err := e.Authorizer.Authorize(r.Context(), external)
+	external.Claims = maps.Clone(external.Claims)
+	identity, err := e.Authorizer.Authorize(ctx, external)
 	if err != nil {
 		return "", err
 	}
-	token, _, err := e.Issuer.Mint(r.Context(), identity)
+	if err := checkSessionExpiry(session.ExpiresAt, e.now()); err != nil {
+		return "", err
+	}
+	token, _, err := e.Issuer.MintWithExpiryLimit(ctx, identity, session.ExpiresAt)
+	if errors.Is(err, tokenissuer.ErrExpiryLimitReached) {
+		return "", errExpiredSession
+	}
 	return token, err
 }
 
-// TokenErrorStatus maps errors from TokenEndpoint.Mint to HTTP status codes.
+// TokenErrorStatus maps errors from TokenEndpoint methods to HTTP status codes.
 // It returns 200 for nil, 401 for missing or invalid sessions, 403 for explicit
 // permission denials, 503 for temporary dependency failures, and 500 for other
 // errors. Temporary failures take precedence over session-rejection markers.
@@ -180,11 +231,8 @@ func (e TokenEndpoint) refreshSession(ctx context.Context, session Session) (Ses
 	if store, ok := e.Store.(SessionUpdateStore); ok {
 		return store.UpdateSession(ctx, session.ID, func(locked Session) (Session, error) {
 			now := e.now()
-			if !locked.RevokedAt.IsZero() {
-				return Session{}, errRevokedSession
-			}
-			if !locked.ExpiresAt.IsZero() && !now.Before(locked.ExpiresAt) {
-				return Session{}, errExpiredSession
+			if err := checkSessionLifetime(locked, now); err != nil {
+				return Session{}, err
 			}
 			if !e.shouldRefresh(locked, now) {
 				return locked, nil
@@ -201,6 +249,20 @@ func (e TokenEndpoint) refreshSession(ctx context.Context, session Session) (Ses
 		return Session{}, err
 	}
 	return session, nil
+}
+
+func checkSessionLifetime(session Session, now time.Time) error {
+	if !session.RevokedAt.IsZero() {
+		return errRevokedSession
+	}
+	return checkSessionExpiry(session.ExpiresAt, now)
+}
+
+func checkSessionExpiry(expiresAt, now time.Time) error {
+	if !expiresAt.IsZero() && !now.Before(expiresAt) {
+		return errExpiredSession
+	}
+	return nil
 }
 
 // OAuth invalid_grant rejects the refresh credential, not the application's
